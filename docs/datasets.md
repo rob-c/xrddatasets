@@ -26,8 +26,8 @@ per digit is the shape a training loop wants: sampling a class reads one part
 of the file rather than seeking all over it, and every tree carries its label
 anyway, so concatenating all ten and shuffling works exactly as well.
 
-Training on it is the loader from [above](#into-pytorch-and-tensorflow), with
-nothing in between:
+Training on it is [`xrdml.tensors`](https://github.com/rob-c/xrdml/blob/main/docs/tensors.md),
+with nothing in between:
 
 ```python
 import torch, xrdroot, xrdml.tensors

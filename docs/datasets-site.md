@@ -6,9 +6,9 @@ so that on any laptop, using the built-in
 `http://ai.edi.scotgrid.ac.uk` catalogue by default:
 
 ```python
-import xrd.ml
+import xrdml
 
-data = xrd.ml.load("mnist")
+data = xrdml.load("mnist")
 for images, labels in data.train.batches(256):
     ...
 ```
@@ -44,7 +44,7 @@ and writes two things beside them:
   repository or mirror, canonical licence URL, what conversion changed, its
   size, its `adler32`, and its row counts per
   tree. This is the catalogue that
-  `xrd.ml.load("name")` resolves names against.
+  `xrdml.load("name")` resolves names against.
 - `MANIFEST` — one checksum line per file, for anyone verifying with their
   own tools.
 
@@ -204,8 +204,8 @@ record these as one logical dataset with several checksummed downloads. Select
 one without spelling its URL using the publisher split or chemical name:
 
 ```python
-train = xrd.ml.load("hepmass", split="train_1000")
-acetone = xrd.ml.load("gas_sensor_arrays_open_sampling", split="acetone")
+train = xrdml.load("hepmass", split="train_1000")
+acetone = xrdml.load("gas_sensor_arrays_open_sampling", split="acetone")
 ```
 
 No row is sampled or discarded by this output sharding.
@@ -246,7 +246,7 @@ the 600 RGB images, 1,339 YOLO boxes, train/validation split and three distance
 strata. All-Sky retains all 818 JPEG/PNG pairs, five pixel values, published
 616/154/48 split, camera identity and camera coordinates. These complete
 sources are below the 100 MB `--large` selection floor, so select them by name
-as shown in the [vision section](root.md#detection-and-pixel-masks) rather than
+as shown in the [vision section](datasets.md#detection-and-pixel-masks) rather than
 expecting `--large` to include them.
 
 A second physics-vision pass adds 20 publicly mirrorable problems totalling
@@ -331,7 +331,7 @@ site, but it is not permission to redistribute them.
 
 ## The licence gate
 
-Nothing in `xrd.root.datasets` is redistributed by this library — but a site
+Nothing in `xrddatasets` is redistributed by this library — but a site
 built from it *does* redistribute, so `build` converts only datasets whose
 licence allows passing the files on. Recognized families include CC0, CC BY
 and BY-SA, MIT, Apache, BSD/ISC/NCSA/PostgreSQL/Zlib/Boost, AFL/ECL/Etalab,
@@ -339,7 +339,7 @@ CDLA-Permissive, ODC-By/ODbL/PDDL, MPL/EPL, Artistic, the GPL family,
 Unlicense/WTFPL and public domain. The two CIFAR sets carry no formal
 licence, so they are left out unless you say `--all`, which is for a
 directory you serve only to yourself. The gate is
-`xrd.root.datasets.redistributable`, and every index entry records the
+`xrddatasets.redistributable`, and every index entry records the
 verdict alongside the licence text, so the site itself says what its terms
 are.
 
@@ -432,7 +432,7 @@ Everything lands next to the files, so *the directory is the deploy*:
   per result, a canonical URL map and crawler policy. Open Graph, description,
   canonical and structured-data metadata are emitted without external assets.
 - `nginx.conf` — hostname-aware static hosting for any stock nginx: drop it in
-  `conf.d/`, and range requests (which `xrd.ml` reads by) come from nginx
+  `conf.d/`, and range requests (which `xrdml` reads by) come from nginx
   itself. The generated listener uses `--nginx-port`.
 - `brix.conf` — the same directory over `root://` (1094), WebDAV (8008) and
   plain HTTP (8080) with a BriX (nginx-xrootd) build of nginx, read-only on
@@ -455,9 +455,9 @@ Names resolve through the catalogue, whole URLs go straight to the file, and
 both read the same way:
 
 ```python
-xrd.ml.load("mnist")  # via XRD_CATALOGUE
-xrd.ml.load("root://data.example.org//mnist.root")  # the native protocol
-xrd.ml.load("https://data.example.org/mnist.root")  # plain HTTP ranges
+xrdml.load("mnist")  # via XRD_CATALOGUE
+xrdml.load("root://data.example.org//mnist.root")  # the native protocol
+xrdml.load("https://data.example.org/mnist.root")  # plain HTTP ranges
 ```
 
 Nothing there is downloaded — the loop reads the baskets each batch needs. For
@@ -465,13 +465,13 @@ a set read many times over, or read from further away than you would like, one
 more word keeps a local copy:
 
 ```python
-xrd.ml.load("mnist", cache=True)  # pulled once, checked against the index
+xrdml.load("mnist", cache=True)  # pulled once, checked against the index
 ```
 
 The pull is verified against the size and `adler32` this site published, so a
 cached file is one the catalogue vouches for rather than merely one that
-arrived. See [Keeping a local copy](ml.md#keeping-a-local-copy).
+arrived. See [Keeping a local copy](https://github.com/rob-c/xrdml/blob/main/docs/ml.md#keeping-a-local-copy).
 
-See [Machine learning](ml.md) for what happens next, and
-[Training playbooks](playbooks.md) for serving a directory ad hoc, with no
+See [Machine learning](https://github.com/rob-c/xrdml) for what happens next, and
+[Training playbooks](https://github.com/rob-c/xrdml/blob/main/docs/playbooks.md) for serving a directory ad hoc, with no
 daemon and no login, while you decide whether to keep it.

@@ -37,7 +37,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e .
+      # With the datasets extra: the publishers' formats are what a full
+      # build spends its time in, and a missing reader would fail whole
+      # datasets rather than the job.
+      - run: pip install -e ".[datasets]"
       # The downloads come from each dataset's publisher, so a flaky mirror
       # fails its own dataset and the step, not silently the site: build
       # exits nonzero if any conversion failed, and verify refuses an index

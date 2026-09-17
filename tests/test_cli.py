@@ -1,990 +1,908 @@
-"""The command-line tools: ``xrd-fs`` and ``xrd-cp``."""
+"""The ``xrd-datasets`` tool: a datasets directory built, checked and published.
+
+Everything here converts a registry of the test's own - two tiny tables,
+one of them under a licence that forbids passing it on - with the downloads
+answered from a directory via ``--base``, so no test touches the network.
+"""
 
 from __future__ import annotations
 
-import argparse
-import io
+import concurrent.futures
 import json
+import threading
+import time
 
 import pytest
+from xrd.config import Config
+from xrdroot import Branch, open_root
 
-from xrd import cli
-from xrd.cli import Endpoints, config_from, dumps, size_arg
-from xrd.cli import cp as cp_cli
-from xrd.cli import fs as fs_cli
-from xrd.errors import XRootDError
-from xrd.testing import FakeDAVServer, FakeS3Server, FakeServer
-from xrd.types import ChecksumInfo, StatInfo
-from xrd.url import parse
+from xrddatasets import DATASETS, Table
+from xrddatasets import cli as datasets_cli
+from xrddatasets._alex_mp20 import ALEX_MP20
+from xrddatasets._hub_tables import HUB_OPEN
+from xrddatasets._the_well import THE_WELL
 
-BODY = b"hello world"
+DEFAULT_WELL_LARGE = {
+    item["name"]
+    for item in THE_WELL
+    if 100_000_000 <= item["source_bytes"] < 2_000_000_000
+}
+
+FLOWERS = Table(
+    name="flowers",
+    label="Flowers",
+    title="a few flowers",
+    licence="CC0",
+    source="https://example.invalid/flowers",
+    creators=("Ada Dataset",),
+    publisher="Example Science Lab",
+    origin="https://origin.example.invalid/flowers",
+    repository="Example Archive",
+    mirrors=(("Teaching mirror", "https://mirror.example.invalid/flowers"),),
+    citation="https://doi.org/10.0000/example.flowers",
+    classes=("red", "blue"),
+    url="https://example.invalid/flowers.csv",
+    fields=(("width", "d"), ("count", "i"), ("kind", "label")),
+    labels={"Red": 0, "Blue": 1},
+)
+
+#: The same shape under a licence :func:`redistributable` refuses.
+CLOSED = Table(
+    name="closed",
+    label="Closed",
+    title="flowers you may not pass on",
+    licence="CC BY-NC 4.0",
+    source="https://example.invalid/closed",
+    url="https://example.invalid/closed.csv",
+    classes=("red", "blue"),
+    fields=(("width", "d"), ("count", "i"), ("kind", "label")),
+    labels={"Red": 0, "Blue": 1},
+)
+
+ROWS = b"1.5,3,Red\n2.5,4,Blue\n3.5,5,Red\n"
 
 
 @pytest.fixture
-def url(server):
-    """The ``root://`` fixture server as a URL string, with a trailing slash."""
-    return str(server.url)
+def registry(monkeypatch):
+    """The test's own datasets, alongside the real ones, for one test."""
+    monkeypatch.setitem(DATASETS, "flowers", FLOWERS)
+    monkeypatch.setitem(DATASETS, "closed", CLOSED)
 
 
 @pytest.fixture
-def dav():
-    with FakeDAVServer(files={"/d/a.root": BODY}) as running:
-        yield running
+def mirror(tmp_path):
+    """A directory answering the downloads, handed to ``--base``."""
+    source = tmp_path / "mirror"
+    source.mkdir()
+    (source / "flowers.csv").write_bytes(ROWS)
+    (source / "closed.csv").write_bytes(ROWS)
+    return f"{source}/"
+
+
+@pytest.fixture
+def out(tmp_path):
+    return tmp_path / "site"
 
 
 def run(argv, capsys):
-    """Run ``xrd-fs`` and hand back ``(exit code, stdout, stderr)``."""
-    code = fs_cli.main(argv)
+    """Run ``xrd-datasets`` and hand back ``(exit code, stdout, stderr)``."""
+    code = datasets_cli.main(argv)
     captured = capsys.readouterr()
     return code, captured.out, captured.err
 
 
-# ---------------------------------------------------------------------------
-# Shared plumbing
-# ---------------------------------------------------------------------------
-
-
-def test_one_endpoint_is_opened_once_however_many_paths_name_it(url):
-    with Endpoints() as endpoints:
-        first, path = endpoints.at(url + "data/a.root")
-        second, other = endpoints.at(url + "data")
-        assert first is second
-        assert (path, other) == ("/data/a.root", "/data")
-
-
-def test_a_local_path_is_not_an_endpoint(tmp_path):
-    with Endpoints() as endpoints, pytest.raises(ValueError, match="local path"):
-        endpoints.at(str(tmp_path))
-
-
-@pytest.mark.parametrize(
-    ("text", "expected"), [("4096", 4096), ("8k", 8192), ("2M", 2 << 20), ("1G", 1 << 30)]
-)
-def test_a_size_is_written_the_way_people_write_it(text, expected):
-    assert size_arg(text) == expected
-
-
-@pytest.mark.parametrize("text", ["", "0", "-1", "eight", "8Q"])
-def test_a_size_that_is_not_one_is_a_usage_error(text):
-    with pytest.raises(argparse.ArgumentTypeError):
-        size_arg(text)
-
-
-def test_json_output_covers_the_types_the_library_returns():
-    payload = json.loads(dumps({"stat": StatInfo(st_size=3), "cks": ChecksumInfo("md5", "ab")}))
-    assert payload["stat"]["st_size"] == 3
-    assert payload["stat"]["flags"] == 0
-    assert payload["cks"] == {"algorithm": "md5", "value": "ab"}
-    # A URL is a dataclass too; it must serialise as itself, not as its fields.
-    assert json.loads(dumps({"u": parse("root://h//p")}))["u"] == "root://h:1094//p"
-    with pytest.raises(TypeError, match="cannot serialise"):
-        dumps({"nope": object()})
-
-
-def test_the_command_line_carries_the_configuration():
-    args = argparse.Namespace(
-        token="t",
-        user="me",
-        no_verify_tls=True,
-        verbose=0,
-        prompt=False,
-        no_prompt=True,
-        config=None,
-        alias=None,
+def built(out, mirror, capsys, *extra):
+    code, _, err = run(
+        ["build", str(out), "--only", "flowers", "--base", mirror, "-q", *extra], capsys
     )
-    config = config_from(args)
-    assert (config.token, config.username, config.verify_tls) == ("t", "me", False)
-    assert config.prompt is False
+    assert code == 0, err
+    return json.loads((out / "index.json").read_text())
 
 
-# ---------------------------------------------------------------------------
-# xrd-fs: reading
-# ---------------------------------------------------------------------------
+# --- list -------------------------------------------------------------------
 
 
-def test_ls_lists_names(url, capsys):
-    code, out, _ = run(["ls", url + "data"], capsys)
+def test_list_names_every_dataset_and_flags_the_withheld_ones(registry, capsys):
+    code, output, _ = run(["list", "--only", "flowers", "--only", "closed"], capsys)
     assert code == 0
-    assert out.split() == ["a.root", "empty"]
+    assert "flowers" in output and "a few flowers" in output
+    assert "closed" in output and "[not redistributable]" in output
+    assert "[not redistributable]" not in output.splitlines()[-1]  # flowers is free to share
 
 
-def test_ls_long_shows_mode_size_and_time(url, capsys):
-    _code, out, _ = run(["ls", "-l", url + "data"], capsys)
-    first = out.splitlines()[0].split()
-    assert first[0].startswith("-rw")
-    assert first[1] == str(len(BODY))
-    assert first[-1] == "a.root"
-
-
-def test_ls_recursive_labels_each_directory(url, capsys):
-    _code, out, _ = run(["ls", "-R", url + "data"], capsys)
-    assert "/data:" in out and "/data/empty:" in out
-
-
-def test_ls_json_is_a_map_of_directory_to_entries(url, capsys):
-    _code, out, _ = run(["ls", "--json", url + "data"], capsys)
-    payload = json.loads(out)
-    assert [e["name"] for e in payload["/data"]] == ["a.root", "empty"]
-    assert payload["/data"][1]["dir"] is True
-
-
-def test_stat_prints_what_the_server_knows(url, capsys):
-    code, out, _ = run(["stat", url + "data/a.root"], capsys)
+def test_list_json_carries_the_licence_verdict(registry, capsys):
+    code, output, _ = run(["list", "--only", "closed", "--json"], capsys)
     assert code == 0
-    assert f"Size:  {len(BODY)}" in out
+    assert json.loads(output) == [
+        {
+            "name": "closed",
+            "title": "flowers you may not pass on",
+            "licence": "CC BY-NC 4.0",
+            "licence_url": "https://creativecommons.org/licenses/by-nc/4.0/",
+            "redistributable": False,
+            **CLOSED.provenance(),
+            "transformation": CLOSED.transformation_summary(),
+            "large": False,
+            "source_bytes": 0,
+            "modality": "tabular",
+            "task": "machine learning",
+        }
+    ]
 
 
-def test_stat_json_gives_the_whole_record(url, capsys):
-    _code, out, _ = run(["stat", "--json", url + "data/a.root", url + "data"], capsys)
-    sizes = [entry["st_size"] for entry in json.loads(out)]
-    assert sizes[0] == len(BODY)
-
-
-def test_cat_writes_bytes_not_text(url, capsysbinary):
-    code = fs_cli.main(["cat", url + "data/a.root"])
-    assert (code, capsysbinary.readouterr().out) == (0, BODY)
-
-
-def test_checksum_asks_the_server(url, capsys):
-    code, out, _ = run(["checksum", url + "data/a.root"], capsys)
-    assert code == 0
-    assert out.split() == ["adler32", "1a0b045d"]
-
-
-def test_checksum_json_keys_by_url(url, capsys):
-    _code, out, _ = run(["checksum", "--json", "-a", "adler32", url + "data/a.root"], capsys)
-    assert json.loads(out)[url + "data/a.root"]["value"] == "1a0b045d"
-
-
-def test_df_reports_space(url, capsys):
-    code, out, _ = run(["df", url], capsys)
-    assert code == 0
-    assert "Read/write nodes" in out
-    _code, payload, _ = run(["df", "--json", url], capsys)
-    assert "free_rw" in json.loads(payload)
-
-
-def test_locate_names_the_servers(url, capsys):
-    code, out, _ = run(["locate", url + "data/a.root"], capsys)
-    assert code == 0
-    assert out.strip()
-    _code, payload, _ = run(["locate", "--json", url + "data/a.root"], capsys)
-    assert json.loads(payload)[0]["address"]
-
-
-def test_locate_can_ask_where_a_new_file_would_go(url, capsys):
-    code, out, _ = run(["locate", "--create", url + "data/new.root"], capsys)
-    assert code == 0
-    assert out.strip()
-
-
-def test_ping_times_the_round_trip(url, capsys):
-    code, out, _ = run(["ping", url], capsys)
-    assert code == 0
-    assert "responded in" in out
-    _code, payload, _ = run(["ping", "--json", url], capsys)
-    assert json.loads(payload)["ms"] >= 0
-
-
-def test_doctor_checks_the_machine_when_given_no_url(capsys):
-    code, out, _ = run(["doctor"], capsys)
-    assert code == 0
-    assert out.startswith("ok  python")
-    assert "auth:" in out
-
-
-def test_doctor_walks_a_whole_url_and_says_the_path_is_there(url, capsys):
-    code, out, _ = run(["doctor", url + "data/a.root"], capsys)
-    assert code == 0
-    assert "ok  connect" in out and "/data/a.root: 11 bytes" in out
-
-
-def test_doctor_fails_the_exit_code_on_something_that_would_stop_a_transfer(url, capsys):
-    code, out, _ = run(["doctor", url + "data/missing.root"], capsys)
+def test_a_glob_that_matches_nothing_is_an_error_that_says_so(capsys):
+    code, _, err = run(["list", "--only", "nosuchset"], capsys)
     assert code == 1
-    assert "!!  path" in out
+    assert "no dataset matches nosuchset" in err
 
 
-def test_doctor_says_the_same_thing_as_data(url, capsys):
-    _code, payload, _ = run(["doctor", "--json", url], capsys)
-    report = json.loads(payload)
-    assert report["ok"] is True
-    assert report["url"] == url
-    assert {"name", "state", "detail", "hint"} == set(report["checks"][0])
+def test_large_selects_disk_backed_sources_regardless_of_origin(capsys):
+    code, output, err = run(["list", "--large", "--json"], capsys)
+    assert code == 0, err
+    records = json.loads(output)
+    original = {
+        "biodcase_2025_task3",
+        "audiomnist",
+        "birdset_baseal",
+        "cifar10",
+        "cifar100",
+        "emnist",
+        "circor_heart_sound",
+        "susy",
+        "multimodal_damage",
+        "pems_sf",
+        "physical_unclonable_functions",
+        "reefset",
+        "speech_commands_v001",
+        "daily_sports_activities",
+        "gas_sensor_temperature",
+        "twin_gas_sensor_arrays",
+        "electricity_load_diagrams",
+        "opportunity_activity",
+        "gas_sensor_dynamic_mixtures",
+        "galaxy10_sdss",
+        "p53_mutants",
+        "pathmnist",
+        "pamap2",
+        "hhar",
+        "jarvis_stm_bravais",
+        "jetnet",
+        "matbench_mp_e_form",
+        "matbench_mp_gap",
+        "matbench_mp_is_metal",
+        "moke_skyrmion_segmentation",
+        "nffa_sem_compact",
+        "omnifold_big",
+        "polymer_blend_afm",
+        "tinysol",
+        "uav_maize_stress",
+        "wildlife_mnist",
+        "wikitext_103",
+        "year_prediction_msd",
+        "swefil",
+        "tissuemnist",
+        "tem_nanoparticle_morphology",
+        "wse2_stm_defects",
+    }
+    hub = {item["name"] for item in HUB_OPEN if item["source_bytes"] >= 100_000_000}
+    alex = {item["name"] for item in ALEX_MP20}
+    _assert_large_names(records, original | hub | alex)
+    assert len(hub) == 37
+    _assert_large_metadata(records)
 
 
-def test_doctor_can_be_asked_to_say_nothing_and_answer_with_its_exit_code(url, capsys):
-    code, out, err = run(["doctor", "--quiet", url], capsys)
-    assert (code, out, err) == (0, "", "")
+def _assert_large_names(records, established):
+    assert {record["name"] for record in records} == established | DEFAULT_WELL_LARGE
+    assert len(DEFAULT_WELL_LARGE) == 50
 
 
-def test_query_reads_server_configuration(server, url, capsys):
-    server.config_values["version"] = "v5.6.0"
-    code, out, _ = run(["query", url, "version"], capsys)
+def _assert_large_metadata(records):
+    assert all(record["large"] and record["transformation"] for record in records)
+    assert any(record["source"].startswith("https://www.nist.gov/") for record in records)
+    assert any(record["source"].startswith("https://archive.ics.uci.edu/") for record in records)
+
+
+def test_the_two_gigabyte_ceiling_is_strict_even_for_an_explicit_name(capsys):
+    code, _, err = run(["list", "--only", "higgs"], capsys)
+    assert code == 1
+    assert "strict 2 GB" in err and "2,000,000,000" in err
+
+
+@pytest.mark.parametrize("flag", ["--allow-oversize", "--no-size-limit"])
+def test_an_explicit_flag_admits_an_oversized_dataset(flag, capsys):
+    code, output, err = run(["list", "--only", "higgs", flag, "--json"], capsys)
+    assert code == 0, err
+    assert json.loads(output) == [
+        {
+            "name": "higgs",
+            "title": DATASETS["higgs"].title,
+            "licence": "CC BY 4.0",
+            "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+            "redistributable": True,
+            **DATASETS["higgs"].provenance(),
+            "transformation": DATASETS["higgs"].transformation_summary(),
+            "large": True,
+            "source_bytes": 2_816_865_137,
+            "modality": "tabular",
+            "task": "machine learning",
+        }
+    ]
+
+
+def test_oversize_expands_the_large_selection_to_every_registered_converter(capsys):
+    code, output, err = run(["list", "--large", "--allow-oversize", "--json"], capsys)
+    assert code == 0, err
+    records = json.loads(output)
+    oversized = {
+        "chipseq",
+        "cuffless_blood_pressure",
+        "gas_sensor_arrays_open_sampling",
+        "hepmass",
+        "higgs",
+        "medical_deepfakes",
+        "ppg_dalia",
+        "realdisp",
+    }
+    assert len(records) == 287
+    assert oversized <= {record["name"] for record in records}
+    assert sum(record["source_bytes"] for record in records) == 681_389_909_770
+
+
+# --- build ------------------------------------------------------------------
+
+
+def test_build_passes_the_oversize_opt_in_to_conversion(monkeypatch, out, capsys):
+    calls = []
+
+    def convert_without_fetch(name, target, **options):
+        calls.append((name, options["allow_oversize"]))
+        target["about"] = "oversized conversion test"
+        return {}
+
+    monkeypatch.setattr(datasets_cli, "convert", convert_without_fetch)
+    code, _, err = run(
+        ["build", str(out), "--only", "higgs", "--allow-oversize", "--jobs", "1", "-q"],
+        capsys,
+    )
+    assert code == 0, err
+    assert calls == [("higgs", True), ("higgs", True)]
+    assert (out / "higgs.root").exists()
+
+
+def test_build_converts_writes_the_index_and_the_manifest(registry, mirror, out, capsys):
+    index = built(out, mirror, capsys)
+    assert index["format"] == 2
+    (entry,) = index["datasets"]
+    _assert_built_identity(entry)
+    _assert_built_payload(entry, out)
+    with open_root(str(out / "flowers.root")) as back:
+        assert sorted(back.keys()) == ["about", "blue", "red"]
+
+
+def _assert_built_identity(entry):
+    assert entry["name"] == "flowers"
+    assert entry["licence"] == "CC0"
+    assert entry["licence_url"] == "https://creativecommons.org/publicdomain/zero/1.0/"
+    assert entry["redistributable"] is True
+    assert entry["source"] == FLOWERS.source
+    _assert_built_provenance(entry)
+    assert entry["transformation"] == FLOWERS.transformation_summary()
+    assert entry["large"] is False and entry["source_bytes"] == 0
+
+
+def _assert_built_provenance(entry):
+    assert entry["origin"] == FLOWERS.origin_url()
+    assert entry["origin_kind"] == "canonical"
+    assert entry["repository"] == FLOWERS.source_repository()
+    assert entry["creators"] == ["Ada Dataset"]
+    assert entry["mirrors"] == [
+        {"name": "Teaching mirror", "url": "https://mirror.example.invalid/flowers"}
+    ]
+
+
+def _assert_built_payload(entry, out):
+    assert entry["download"] == "flowers.root"
+    assert entry["trees"] == {"red": 2, "blue": 1}
+    assert entry["rows"] == 3
+    assert entry["bytes"] == (out / "flowers.root").stat().st_size
+    assert entry["schemas"] == {
+        tree: {
+            "width": {"type": "float64", "length": 1, "jagged": False},
+            "count": {"type": "int32", "length": 1, "jagged": False},
+            "label": {"type": "int32", "length": 1, "jagged": False},
+            "index": {"type": "int32", "length": 1, "jagged": False},
+        }
+        for tree in ("red", "blue")
+    }
+    assert f"{entry['adler32']}" in (out / "MANIFEST").read_text()
+    assert "flowers.root" in (out / "MANIFEST").read_text()
+
+
+def test_build_keeps_what_is_already_there_and_force_starts_over(registry, mirror, out, capsys):
+    built(out, mirror, capsys)
+    before = (out / "flowers.root").stat().st_mtime_ns
+    code, output, _ = run(["build", str(out), "--only", "flowers", "--base", mirror], capsys)
     assert code == 0
-    assert out.strip() == "version v5.6.0"
-    _code, payload, _ = run(["query", "--json", url, "version"], capsys)
-    assert json.loads(payload) == {"version": "v5.6.0"}
+    assert "kept" in output
+    assert (out / "flowers.root").stat().st_mtime_ns == before
+    built(out, mirror, capsys, "--force")
+    assert (out / "flowers.root").stat().st_mtime_ns != before
 
 
-# ---------------------------------------------------------------------------
-# xrd-fs: writing
-# ---------------------------------------------------------------------------
+def test_build_replaces_an_unreadable_partial_output(registry, mirror, out, capsys):
+    out.mkdir()
+    target = out / "flowers.root"
+    target.write_bytes(b"interrupted ROOT output")
 
+    code, _, err = run(
+        ["build", str(out), "--only", "flowers", "--base", mirror, "-q"], capsys
+    )
+    index = json.loads((out / "index.json").read_text())
 
-def test_mkdir_makes_parents_on_request(server, url, capsys):
-    assert run(["mkdir", "-p", url + "data/x/y"], capsys)[0] == 0
-    assert "/data/x/y" in server.dirs
-    assert run(["mkdir", url + "data/x/y"], capsys)[0] == 1  # already there
-
-
-def test_touch_then_rm(server, url, capsys):
-    assert run(["touch", url + "data/t.txt"], capsys)[0] == 0
-    assert server.contents("/data/t.txt") == b""
-    assert run(["rm", url + "data/t.txt"], capsys)[0] == 0
-    assert "/data/t.txt" not in server.files
-
-
-def test_rm_reports_what_is_not_there_unless_forced(url, capsys):
-    code, _out, err = run(["rm", url + "data/nope"], capsys)
-    assert code == 1
-    assert "xrd-fs:" in err
-    assert run(["rm", "-f", url + "data/nope"], capsys)[0] == 0
-
-
-def test_rm_recursive_takes_the_tree(server, url, capsys):
-    server.add_file("/data/tree/deep/f.bin", b"x")
-    assert run(["rm", "-r", url + "data/tree"], capsys)[0] == 0
-    assert not [p for p in server.files if p.startswith("/data/tree")]
-
-
-def test_rmdir_keeps_the_emptiness_rule(server, url, capsys):
-    assert run(["rmdir", url + "data"], capsys)[0] == 1  # not empty
-    assert run(["rmdir", url + "data/empty"], capsys)[0] == 0
-    assert "/data/empty" not in server.dirs
-
-
-def test_mv_renames_within_one_endpoint(server, url, capsys):
-    assert run(["mv", url + "data/a.root", url + "data/b.root"], capsys)[0] == 0
-    assert server.contents("/data/b.root") == BODY
-
-
-def test_mv_between_endpoints_says_to_use_xrd_cp(url, capsys):
-    with FakeServer() as other:
-        code, _out, err = run(["mv", url + "data/a.root", str(other.url) + "b.root"], capsys)
-    assert code == 1
-    assert "xrd-cp" in err
-
-
-def test_xattr_gets_sets_and_removes(url, capsys):
-    assert run(["xattr", url + "data/a.root", "--set", "run=42"], capsys)[0] == 0
-    _code, out, _ = run(["xattr", url + "data/a.root"], capsys)
-    assert out.strip() == "run=42"
-    _code, payload, _ = run(["xattr", "--json", url + "data/a.root"], capsys)
-    assert json.loads(payload) == {"run": "42"}
-    assert run(["xattr", url + "data/a.root", "--remove", "run"], capsys)[0] == 0
-    assert run(["xattr", "--json", url + "data/a.root"], capsys)[1].strip() == "{}"
-
-
-def test_xattr_recursive_lists_names_under_a_directory(url, capsys):
-    assert run(["xattr", url + "data/a.root", "--set", "run=42"], capsys)[0] == 0
-    _code, out, _ = run(["xattr", "-r", url + "data"], capsys)
-    assert out.strip() == "a.root: run"
-    _code, payload, _ = run(["xattr", "--json", "-r", url + "data"], capsys)
-    assert json.loads(payload) == {"a.root": ["run"]}
-
-
-# ---------------------------------------------------------------------------
-# xrd-fs: failure modes
-# ---------------------------------------------------------------------------
-
-
-def test_a_missing_path_exits_one_and_says_why(url, capsys):
-    code, _out, err = run(["stat", url + "data/nope"], capsys)
-    assert code == 1
-    assert "no such file" in err
-
-
-def test_a_local_path_is_refused_with_a_useful_message(tmp_path, capsys):
-    code, _out, err = run(["ls", str(tmp_path)], capsys)
-    assert (code, "local path" in err) == (1, True)
-
-
-def test_no_subcommand_is_a_usage_error(capsys):
-    with pytest.raises(SystemExit) as exit_info:
-        fs_cli.main([])
-    assert exit_info.value.code == 2
-
-
-def test_webdav_urls_work_in_the_same_tool(dav, capsys):
-    code, out, _ = run(["ls", str(dav.url) + "d"], capsys)
-    assert (code, out.strip()) == (0, "a.root")
-    assert run(["checksum", str(dav.url) + "d/a.root"], capsys)[1].split()[1] == "1a0b045d"
-
-
-def test_what_webdav_cannot_do_is_reported_not_crashed(dav, capsys):
-    code, _out, err = run(["df", str(dav.url)], capsys)
-    assert code == 1
-    assert "statvfs" in err
-
-
-# ---------------------------------------------------------------------------
-# xrd-cp
-# ---------------------------------------------------------------------------
-
-
-def test_a_download_names_its_target(url, tmp_path, capsys):
-    target = tmp_path / "out.root"
-    code = cp_cli.main([url + "data/a.root", str(target)])
-    out = capsys.readouterr().out
-    assert (code, target.read_bytes()) == (0, BODY)
-    assert "11 bytes" in out
-
-
-def test_a_trailing_slash_means_into_this_directory(url, tmp_path, capsys):
-    code = cp_cli.main([url + "data/a.root", str(tmp_path) + "/"])
-    capsys.readouterr()
-    assert (code, (tmp_path / "a.root").read_bytes()) == (0, BODY)
-
-
-def test_an_existing_directory_means_the_same(url, tmp_path, capsys):
-    assert cp_cli.main(["-q", url + "data/a.root", str(tmp_path)]) == 0
-    assert (tmp_path / "a.root").read_bytes() == BODY
-    assert capsys.readouterr().out == ""
-
-
-def test_several_sources_need_a_directory(server, url, tmp_path, capsys):
-    server.add_file("/data/b.txt", b"second")
-    assert cp_cli.main([url + "data/a.root", url + "data/b.txt", str(tmp_path)]) == 0
-    capsys.readouterr()
-    assert (tmp_path / "b.txt").read_bytes() == b"second"
-    code = cp_cli.main([url + "data/a.root", url + "data/b.txt", str(tmp_path / "one.bin")])
-    assert (code, "not a directory" in capsys.readouterr().err) == (2, True)
-
-
-def test_recursive_copies_the_tree(server, url, tmp_path, capsys):
-    server.add_file("/data/sub/deep.bin", b"deep")
-    assert cp_cli.main(["-r", "-q", url + "data", str(tmp_path / "tree")]) == 0
-    assert (tmp_path / "tree/sub/deep.bin").read_bytes() == b"deep"
-
-
-def test_an_upload_goes_the_other_way(server, url, tmp_path, capsys):
-    source = tmp_path / "up.bin"
-    source.write_bytes(b"payload")
-    assert cp_cli.main(["-q", str(source), url + "data/up.bin"]) == 0
-    assert server.contents("/data/up.bin") == b"payload"
-
-
-def test_no_clobber_refuses_an_existing_target(url, tmp_path, capsys):
-    target = tmp_path / "out.root"
-    target.write_bytes(b"keep")
-    code = cp_cli.main(["-n", url + "data/a.root", str(target)])
-    assert (code, target.read_bytes()) == (1, b"keep")
-    assert "xrd-cp:" in capsys.readouterr().err
-
-
-def test_json_reports_the_transfer(url, tmp_path, capsys):
-    code = cp_cli.main(["--json", url + "data/a.root", str(tmp_path / "o.root")])
-    record, = json.loads(capsys.readouterr().out)
     assert code == 0
-    assert record["size"] == len(BODY)
-    assert record["verified"] is True
-    assert record["checksum"] == "adler32:1a0b045d"
+    assert index["datasets"][0]["name"] == "flowers"
+    assert target.read_bytes() != b"interrupted ROOT output"
+    assert "existing output is unreadable" in err
+    assert not (out / ".flowers.root.partial").exists()
 
 
-def test_verification_can_be_demanded(url, tmp_path, capsys):
-    argv = ["--verify", "-a", "adler32", "--json", url + "data/a.root", str(tmp_path / "a")]
-    assert cp_cli.main(argv) == 0
-    record, = json.loads(capsys.readouterr().out)
-    assert record["checksum"] == "adler32:1a0b045d"
+def test_build_refuses_a_licence_that_withholds_redistribution(registry, mirror, out, capsys):
+    code, _, err = run(["build", str(out), "--only", "closed", "--base", mirror], capsys)
+    assert code == 1
+    assert "does not allow redistribution" in err and "--all" in err
+    assert not (out / "closed.root").exists()
 
 
-def test_verification_can_be_skipped(url, tmp_path, capsys):
-    assert cp_cli.main(["--no-verify", "--json", url + "data/a.root", str(tmp_path / "b")]) == 0
-    record, = json.loads(capsys.readouterr().out)
-    assert (record["verified"], record["checksum"]) == (False, None)
+def test_build_all_converts_it_anyway_and_the_index_says_what_it_is(registry, mirror, out, capsys):
+    code, _, err = run(
+        ["build", str(out), "--only", "closed", "--base", mirror, "-q", "--all"], capsys
+    )
+    assert code == 0, err
+    index = json.loads((out / "index.json").read_text())
+    (entry,) = index["datasets"]
+    assert entry["name"] == "closed"
+    assert entry["redistributable"] is False
+    assert (out / "closed.root").exists()
 
 
-def test_the_chunk_size_is_honoured(url, tmp_path, capsys):
-    assert cp_cli.main(["-q", "--chunk-size", "4", url + "data/a.root", str(tmp_path / "c")]) == 0
-    assert (tmp_path / "c").read_bytes() == BODY
+def test_a_download_that_fails_fails_that_dataset_and_no_other(registry, out, tmp_path, capsys):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    code, _, err = run(["build", str(out), "--only", "flowers", "--base", f"{empty}/"], capsys)
+    assert code == 1
+    assert "flowers" in err
+    assert not (out / "flowers.root").exists()  # no half-written file left behind
+    assert not (out / ".flowers.root.partial").exists()
+    assert json.loads((out / "index.json").read_text())["datasets"] == []
 
 
-def test_a_scheme_nobody_speaks_is_reported(tmp_path, capsys):
-    code = cp_cli.main(["ftp://example.org/f", str(tmp_path / "x")])
-    assert (code, "cannot read from ftp" in capsys.readouterr().err) == (1, True)
+def test_concurrent_conversions_use_independent_atomic_temporary_files(
+    registry, out, monkeypatch
+):
+    out.mkdir()
+    barrier = threading.Barrier(2)
+    targets = []
+
+    def convert_together(_name, target, **_options):
+        targets.append(target.name)
+        barrier.wait()
+        target["about"] = "complete concurrent conversion"
+        return {}
+
+    monkeypatch.setattr(datasets_cli, "convert", convert_together)
+    diagnostics = datasets_cli._Diagnostics(None, out, out / "cache")
+    options = {
+        "base": None,
+        "compression": "zlib",
+        "source_cache": out / "cache",
+        "allow_oversize": False,
+        "config": Config(),
+        "diagnostics": diagnostics,
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(datasets_cli._convert_one, "flowers", out / "flowers.root", **options)
+            for _ in range(2)
+        ]
+        assert all(future.result()["name"] == "flowers" for future in futures)
+
+    assert len(set(targets)) == 2
+    assert (out / "flowers.root").exists()
+    assert (out / "flowers.root").stat().st_mode & 0o444 == 0o444
+    assert not list(out.glob("*.partial"))
 
 
-def test_third_party_is_one_flag(url, capsys):
-    with FakeServer() as destination:
-        code = cp_cli.main(["--tpc", "-q", url + "data/a.root", str(destination.url) + "pulled"])
-        assert code == 0
-        assert any("tpc.key" in path for path in destination.opened)
+def test_oversized_multi_split_outputs_are_catalogued_as_root_shards(
+    monkeypatch, out, capsys
+):
+    def convert_without_fetch(_name, target, *, split, **_options):
+        target["about"] = f"HEPMASS {split}"
+        tree = target.tree("rows", {"features": ("f", 2), "label": "i", "index": "i"})
+        tree.fill(features=[1.0, 2.0], label=0, index=0)
+        return {"rows": 1}
+
+    monkeypatch.setattr(datasets_cli, "convert", convert_without_fetch)
+    code, _, err = run(
+        [
+            "build",
+            str(out),
+            "--only",
+            "hepmass",
+            "--allow-oversize",
+            "--jobs",
+            "1",
+            "-q",
+        ],
+        capsys,
+    )
+    assert code == 0, err
+    (entry,) = json.loads((out / "index.json").read_text())["datasets"]
+    assert [file["split"] for file in entry["files"]] == list(DATASETS["hepmass"].splits)
+    assert all((out / file["file"]).exists() for file in entry["files"])
+    assert "hepmass--train_1000.root" in (out / "MANIFEST").read_text()
+
+    code, _, err = run(["verify", str(out), "-q"], capsys)
+    assert code == 0, err
+
+    code, _, err = run(
+        ["site", str(out), "--base-url", "https://data.example.org", "-q"], capsys
+    )
+    assert code == 0, err
+    detail = (out / "datasets" / "hepmass.html").read_text()
+    assert "train_1000" in detail and "test_not1000" in detail
+    assert 'split="train_1000"' in detail
 
 
-def test_third_party_between_webdav_endpoints_is_the_same_flag(dav, capsys):
-    """One flag, either dialect: the URLs decide which one is spoken."""
-    with FakeDAVServer(dirs=["/d"]) as destination:
-        code = cp_cli.main(
-            ["--tpc", "-q", str(dav.url) + "d/a.root", str(destination.url) + "d/pulled"]
+def test_an_unexpected_converter_error_does_not_abort_later_datasets(
+    registry, out, capsys, monkeypatch
+):
+    def convert_with_one_broken_dataset(name, target, **_options):
+        if name == "closed":
+            raise RuntimeError("broken HDF5 decoder")
+        target["about"] = "successful conversion after a failed future"
+        return {}
+
+    monkeypatch.setattr(datasets_cli, "convert", convert_with_one_broken_dataset)
+    code, _, err = run(
+        [
+            "build",
+            str(out),
+            "--only",
+            "closed",
+            "--only",
+            "flowers",
+            "--all",
+            "--jobs",
+            "1",
+            "-q",
+        ],
+        capsys,
+    )
+
+    assert code == 1
+    assert "closed: RuntimeError: broken HDF5 decoder" in err
+    assert not (out / "closed.root").exists()
+    assert (out / "flowers.root").exists()
+    index = json.loads((out / "index.json").read_text())
+    assert [entry["name"] for entry in index["datasets"]] == ["flowers"]
+
+
+def test_diagnostics_report_phase_rows_output_and_completion(
+    registry, out, capsys, monkeypatch
+):
+    def convert_with_progress(_name, target, *, progress, **_options):
+        target["about"] = "diagnostic conversion"
+        progress(12_345)
+        time.sleep(0.05)
+        return {}
+
+    monkeypatch.setattr(datasets_cli, "convert", convert_with_progress)
+    code, _, err = run(
+        [
+            "build",
+            str(out),
+            "--only",
+            "flowers",
+            "--jobs",
+            "1",
+            "--diagnostics",
+            "0.01",
+            "-q",
+        ],
+        capsys,
+    )
+
+    assert code == 0
+    assert "diagnostics enabled" in err
+    assert "flowers: started" in err
+    assert "flowers: all: fetching sources and converting" in err
+    assert "heartbeat: flowers: split=all, rows=12,345" in err
+    assert "ROOT file closed; reading it back and checksumming" in err
+    assert "flowers: completed" in err
+
+
+# --- verify -----------------------------------------------------------------
+
+
+def test_verify_blesses_a_directory_that_matches_its_index(registry, mirror, out, capsys):
+    built(out, mirror, capsys)
+    code, output, _ = run(["verify", str(out)], capsys)
+    assert code == 0
+    assert "1 of 1 files match the index" in output
+    assert "load completely" in output
+
+
+def test_verify_decodes_every_entry_of_every_branch(
+    registry, mirror, out, capsys, monkeypatch
+):
+    built(out, mirror, capsys)
+    reached = {}
+    original = Branch.array
+
+    def tracked(self, entry_start=0, entry_stop=None):
+        stop = self.num_entries if entry_stop is None else entry_stop
+        previous = reached.get(id(self), (0, self.num_entries))[0]
+        reached[id(self)] = (max(previous, stop), self.num_entries)
+        return original(self, entry_start, entry_stop)
+
+    monkeypatch.setattr(Branch, "array", tracked)
+
+    code, _, err = run(["verify", str(out), "-q"], capsys)
+
+    assert code == 0, err
+    assert len(reached) == 8
+    assert all(stop == entries for stop, entries in reached.values())
+
+
+def test_verify_rejects_a_branch_schema_unlike_the_build_manifest(
+    registry, mirror, out, capsys
+):
+    index = built(out, mirror, capsys)
+    index["datasets"][0]["schemas"]["red"]["width"]["type"] = "float32"
+    (out / "index.json").write_text(json.dumps(index))
+
+    code, _, err = run(["verify", str(out), "-q"], capsys)
+
+    assert code == 1
+    assert "schema" in err and "float32" in err
+
+
+def test_verify_requires_an_index_with_branch_schemas(registry, mirror, out, capsys):
+    index = built(out, mirror, capsys)
+    del index["datasets"][0]["schemas"]
+    (out / "index.json").write_text(json.dumps(index))
+
+    code, _, err = run(["verify", str(out), "-q"], capsys)
+
+    assert code == 1
+    assert "no branch schemas" in err and "rerun xrd-datasets build" in err
+
+
+def test_build_refreshes_schema_metadata_without_reconverting_an_old_catalogue(
+    registry, mirror, out, capsys
+):
+    index = built(out, mirror, capsys)
+    del index["datasets"][0]["schemas"]
+    (out / "index.json").write_text(json.dumps(index))
+    before = (out / "flowers.root").stat().st_mtime_ns
+
+    code, output, err = run(
+        ["build", str(out), "--only", "flowers", "--base", mirror], capsys
+    )
+
+    assert code == 0, err
+    assert "kept" in output and (out / "flowers.root").stat().st_mtime_ns == before
+    refreshed = json.loads((out / "index.json").read_text())
+    assert refreshed["datasets"][0]["schemas"]["red"]["width"]["type"] == "float64"
+
+
+def _replace_with_sentinel_payload(out, values, typecode):
+    target = out / "flowers.root"
+    with datasets_cli.create(str(target)) as root:
+        tree = root.tree(
+            "rows", {"features": (typecode, len(values)), "label": "i", "index": "i"}
         )
-        assert code == 0
-        assert destination.contents("/d/pulled") == BODY
-        assert destination.copies[-1]["Source"].endswith("/d/a.root")
-
-
-def test_a_copy_between_protocols_works_both_ways(url, dav, tmp_path, capsys):
-    assert cp_cli.main(["-q", str(dav.url) + "d/a.root", url + "data/from-dav"]) == 0
-    assert cp_cli.main(["-q", url + "data/a.root", str(dav.url) + "d/from-root"]) == 0
-    capsys.readouterr()
-    assert dav.contents("/d/from-root") == BODY
-
-
-def test_a_bucket_is_a_url_like_any_other_at_the_command_line(url, monkeypatch, capsys):
-    """No S3 flags: the credentials come from the environment, as they do for
-    every other S3 tool, and the URL is what tells the CLI where to look."""
-    with FakeS3Server(objects={"d/a.root": BODY}) as s3:
-        monkeypatch.setenv("AWS_ENDPOINT_URL", s3.endpoint)
-        monkeypatch.setenv("AWS_ACCESS_KEY_ID", s3.access_key)
-        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", s3.secret_key)
-        code, out, _err = run(["ls", "-l", "s3://test-bucket/d"], capsys)
-        assert (code, "a.root" in out) == (0, True)
-        assert cp_cli.main(["-q", url + "data/a.root", "s3://test-bucket/d/from-root"]) == 0
-        capsys.readouterr()
-        assert s3.contents("d/from-root") == BODY
-
-
-# ---------------------------------------------------------------------------
-# The progress display
-# ---------------------------------------------------------------------------
-
-
-def test_the_bar_redraws_only_when_the_percentage_moves():
-    stream = io.StringIO()
-    bar = cp_cli.Bar("f.root", stream)
-    for done in (0, 1, 2, 50, 100, 100):  # the last two say the same thing
-        bar(done, 100)
-    bar.finish()
-    frames = [f for f in stream.getvalue().split("\r") if f]
-    assert len(frames) == 5  # 0%, 1%, 2%, 50%, 100% - and 100% only once
-    assert "100%" in frames[-1]
-    assert frames[-1].endswith("\n")
-
-
-def test_the_bar_copes_with_a_source_of_unknown_size():
-    stream = io.StringIO()
-    bar = cp_cli.Bar("stream", stream)
-    bar(1024, None)
-    bar.finish()
-    assert "1.0 KiB" in stream.getvalue()
+        for index in range(3):
+            tree.fill(features=values, label=0, index=index)
+    document = json.loads((out / "index.json").read_text())
+    document["datasets"] = [datasets_cli._entry("flowers", target, {"rows": 3})]
+    (out / "index.json").write_text(json.dumps(document))
 
 
 @pytest.mark.parametrize(
-    ("size", "text"), [(0, "0 B"), (999, "999 B"), (1024, "1.0 KiB"), (5 << 20, "5.0 MiB")]
-)
-def test_byte_counts_are_human_readable(size, text):
-    assert cp_cli._human(size) == text
-
-
-def test_progress_is_off_when_stdout_is_not_a_terminal(url, tmp_path, capsys):
-    """A pipe gets clean output; a tty gets a bar. Nothing else decides it."""
-    assert cp_cli.main(["-p", "-q", url + "data/a.root", str(tmp_path / "p")]) == 0
-    assert "%" in capsys.readouterr().err
-    assert cp_cli.main(["-q", url + "data/a.root", str(tmp_path / "q")]) == 0
-    assert capsys.readouterr().err == ""
-
-
-@pytest.mark.parametrize(("verbosity", "level"), [(1, "WARNING"), (2, "INFO"), (3, "DEBUG")])
-def test_verbosity_flags_choose_a_logging_level(verbosity, level, monkeypatch):
-    import logging
-
-    chosen: dict[str, object] = {}
-    monkeypatch.setattr(logging, "basicConfig", lambda **kw: chosen.update(kw))
-    cli.configure_logging(verbosity)
-    assert logging.getLevelName(chosen["level"]) == level
-
-
-def test_no_verbosity_flag_leaves_logging_alone(monkeypatch):
-    import logging
-
-    monkeypatch.setattr(
-        logging, "basicConfig", lambda **kw: pytest.fail("logging was configured anyway")
-    )
-    cli.configure_logging(0)
-
-
-def test_the_json_encoder_refuses_what_it_cannot_render():
-    with pytest.raises(TypeError, match="cannot serialise"):
-        cli.dumps({"handle": object()})
-
-
-def test_the_json_encoder_renders_flags_as_numbers_and_bytes_as_text():
-    from xrd.flags import OpenFlags
-
-    assert cli.dumps({"flags": OpenFlags.READ}) == f'{{\n  "flags": {int(OpenFlags.READ)}\n}}'
-    assert '"payload": "hi"' in cli.dumps({"payload": b"hi"})
-
-
-def test_a_bar_that_never_drew_anything_leaves_the_terminal_alone(capsys):
-    """No percentage was ever printed, so there is no line to close."""
-    cp_cli.Bar("f.root").finish()
-    assert capsys.readouterr().err == ""
-
-
-def test_ping_can_be_asked_to_say_nothing(url, capsys):
-    code, out, err = run(["ping", "--quiet", url], capsys)
-    assert (code, out, err) == (0, "", "")
-
-
-def test_a_trailing_slash_is_a_directory_without_asking(url):
-    """``cp f d/`` means *into* ``d`` even before anyone has looked."""
-    assert cp_cli._is_dir(parse(url + "data/"), Endpoints(cli.Config())) is True
-
-
-def test_a_destination_the_server_will_not_discuss_is_not_a_directory():
-    """``isdir`` failing is an answer: treat the name as a file to write."""
-
-    class Grumpy:
-        def isdir(self, _path):
-            raise XRootDError("no")
-
-    class Only:
-        def at(self, _url):
-            return Grumpy(), "/d"
-
-    assert cp_cli._is_dir(parse("root://h//d"), Only()) is False
-
-
-# ---------------------------------------------------------------------------
-# xrd-fs: the rest of the namespace
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def lines(server):
-    """A file of numbered lines, and the URL of the server holding it."""
-    body = b"".join(b"line %d\n" % n for n in range(1, 21))
-    server.add_file("/data/log.txt", body)
-    return str(server.url)
-
-
-def test_tail_prints_the_last_ten_lines_by_default(lines, capsys):
-    code, out, _ = run(["tail", lines + "data/log.txt"], capsys)
-    assert code == 0
-    assert out.splitlines() == [f"line {n}" for n in range(11, 21)]
-
-
-def test_tail_takes_a_line_count(lines, capsys):
-    assert run(["tail", "-n", "2", lines + "data/log.txt"], capsys)[1].split() == [
-        "line", "19", "line", "20",
-    ]
-
-
-def test_tail_reading_only_the_end_drops_the_partial_line_it_landed_in(lines, capsys):
-    """A window that starts mid-line must not print half of one."""
-    _code, out, _ = run(["tail", "--bytes", "20", "-n", "5", lines + "data/log.txt"], capsys)
-    assert all(line.startswith("line ") for line in out.splitlines())
-
-
-def test_tail_follow_prints_what_is_appended(server, capsys):
-    server.add_file("/data/grow.txt", b"first\n")
-    filesystem, path = Endpoints(cli.Config()).at(str(server.url) + "data/grow.txt")
-    out = io.BytesIO()
-    server.add_file("/data/grow.txt", b"first\nsecond\n")
-    with filesystem:
-        # Long enough to come round again after printing: the print itself is a
-        # whole open-and-read, and a follow that stopped there would never have
-        # been asked the only question that matters - "anything more?"
-        fs_cli._follow(out, filesystem, path, 6, 0.01, deadline=_soon(2.0))
-    assert out.getvalue() == b"second\n"
-
-
-def test_tail_follow_stops_when_the_file_goes_away(server):
-    filesystem, path = Endpoints(cli.Config()).at(str(server.url) + "data/a.root")
-    del server.files["/data/a.root"]
-    with filesystem:
-        fs_cli._follow(io.BytesIO(), filesystem, path, 0, 0.01, deadline=_soon(10.0))
-
-
-def test_tail_follow_stops_when_the_file_shrinks(server):
-    """A shorter file is a different file; the next byte would not follow on."""
-    filesystem, path = Endpoints(cli.Config()).at(str(server.url) + "data/a.root")
-    with filesystem:
-        fs_cli._follow(io.BytesIO(), filesystem, path, 99, 0.01, deadline=_soon(10.0))
-
-
-def test_tail_follow_from_the_command_line_stops_on_an_interrupt(server, capsys, monkeypatch):
-    """Ctrl-C ends ``tail -f`` quietly - that is what a user presses to stop it."""
-
-    def interrupted(out, filesystem, path, size, interval, **kwargs):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(fs_cli, "_follow", interrupted)
-    argv = ["tail", "-f", "--interval", "0.01", str(server.url) + "data/a.root"]
-    code, out, _ = run(argv, capsys)
-    assert (code, out) == (0, BODY.decode())
-
-
-def _soon(seconds: float = 0.05) -> float:
-    import time
-
-    return time.monotonic() + seconds
-
-
-def test_du_totals_a_tree(url, capsys):
-    code, out, _ = run(["du", url + "data"], capsys)
-    fields = out.split()
-    assert (code, fields[0], fields[1]) == (0, str(len(BODY)), "1")
-
-
-def test_du_of_a_single_file_counts_one(url, capsys):
-    _code, payload, _ = run(["du", "--json", url + "data/a.root"], capsys)
-    assert list(json.loads(payload).values()) == [{"bytes": len(BODY), "files": 1}]
-
-
-def test_du_adds_up_what_the_listing_does_not_carry(server, capsys):
-    """A server that lists without sizes still gets counted, one stat each."""
-    from xrd.proto import constants as c
-
-    server.add_file("/data/sub/x.bin", b"12345")
-
-    def bare(conn, sid, params, body):
-        yield from _plain_listing(conn, sid, params, body)
-
-    server.handlers[c.kXR_dirlist] = bare
-    _code, out, _ = run(["du", str(server.url) + "data"], capsys)
-    assert out.split()[0] == str(len(BODY) + 5)
-
-
-def _plain_listing(conn, sid, params, body):
-    """A ``kXR_dirlist`` reply with names only - no stat lines attached."""
-    from xrd.proto import constants as c
-    from xrd.testing import frame
-
-    path = body.split(b"\x00", 1)[0].decode().partition("?")[0].rstrip("/") or "/"
-    names = conn._children(path)
-    yield frame(sid, c.kXR_ok, "\n".join(names).encode() + b"\x00")
-
-
-def test_chmod_changes_the_mode(url, server, capsys):
-    assert run(["chmod", "640", url + "data/a.root"], capsys)[0] == 0
-    assert server.modes["/data/a.root"] == 0o640
-
-
-def test_chown_takes_uid_gid_or_either_alone(url, server, capsys):
-    assert run(["chown", "1000:1000", url + "data/a.root"], capsys)[0] == 0
-    assert server.owners["/data/a.root"] == (1000, 1000)
-    assert run(["chown", ":42", url + "data/a.root"], capsys)[0] == 0
-    assert server.owners["/data/a.root"] == (-1, 42)
-    assert run(["chown", "7", url + "data/a.root"], capsys)[0] == 0
-    assert server.owners["/data/a.root"] == (7, -1)
-
-
-def test_chown_rejects_a_name_rather_than_guessing_an_id(url, capsys):
-    """The names live in the server's passwd file, not this machine's."""
-    with pytest.raises(SystemExit):
-        run(["chown", "alice", url + "data/a.root"], capsys)
-
-
-def test_touch_can_set_the_times_as_well_as_create(url, server, capsys):
-    assert run(["touch", "--time", "1000000000", url + "data/new.root"], capsys)[0] == 0
-    assert server.times["/data/new.root"] == (10**18, 10**18)
-    assert run(["touch", "--time", "now", url + "data/a.root"], capsys)[0] == 0
-    assert server.times["/data/a.root"][1] > 10**18
-
-
-def test_touch_without_a_time_only_creates(url, server, capsys):
-    assert run(["touch", url + "data/plain.root"], capsys)[0] == 0
-    assert server.contents("/data/plain.root") == b""
-    assert "/data/plain.root" not in server.times
-
-
-def test_truncate_resizes_without_opening(url, server, capsys):
-    assert run(["truncate", "-s", "4", url + "data/a.root"], capsys)[0] == 0
-    assert server.contents("/data/a.root") == b"hell"
-
-
-def test_prepare_asks_for_a_stage_and_prints_the_handle(url, capsys):
-    code, out, _ = run(["prepare", url + "data/a.root"], capsys)
-    assert (code, bool(out.strip())) == (0, True)
-
-
-def test_prepare_can_evict_instead(url, server, capsys):
-    from xrd.proto import constants as c
-
-    code, out, _ = run(["prepare", "--evict", "--priority", "2", url + "data/a.root"], capsys)
-    assert (code, out) == (0, "")
-    assert c.kXR_prepare in server.seen
-
-
-def test_prepare_status_reports_instead_of_staging(url, capsys):
-    handle = json.loads(run(["prepare", "--json", url + "data/a.root"], capsys)[1])[0]
-    code, out, _ = run(["prepare", "--status", handle, url + "data/a.root"], capsys)
-    assert (code, out.strip()) == (0, "/data/a.root: online")
-
-
-def test_prepare_status_as_json_carries_every_flag(url, capsys):
-    handle = json.loads(run(["prepare", "--json", url + "data/a.root"], capsys)[1])[0]
-    code, out, _ = run(["prepare", "--json", "--status", handle, url + "data/a.root"], capsys)
-    record = json.loads(out)[0]
-    assert code == 0
-    assert (record["path"], record["online"], record["on_tape"]) == ("/data/a.root", True, False)
-
-
-def test_prepare_status_says_nothing_when_asked_to_be_quiet(url, capsys):
-    handle = json.loads(run(["prepare", "--json", url + "data/a.root"], capsys)[1])[0]
-    assert run(["prepare", "-q", "--status", handle, url + "data/a.root"], capsys)[1] == ""
-
-
-def test_prepare_groups_paths_by_endpoint(url, capsys):
-    with FakeServer(files={"/other/b.bin": b"b"}) as second:
-        argv = ["prepare", "--json", url + "data/a.root", str(second.url) + "other/b.bin"]
-        code, out, _ = run(argv, capsys)
-    assert (code, len(json.loads(out))) == (0, 2)
-
-
-def test_locality_says_where_a_file_is_without_staging_it(url, server, capsys):
-    server.nearline.add("/data/a.root")
-    code, out, _ = run(["locality", url + "data/a.root"], capsys)
-    assert (code, out.strip()) == (0, "/data/a.root: on tape")
-
-
-def test_locality_as_json_carries_the_state_word(url, capsys):
-    code, out, _ = run(["locality", "--json", url + "data/a.root"], capsys)
-    record = json.loads(out)[0]
-    assert code == 0
-    assert (record["path"], record["state"], record["online"]) == ("/data/a.root", "ONLINE", True)
-
-
-def test_locality_says_nothing_when_asked_to_be_quiet(url, capsys):
-    assert run(["locality", "-q", url + "data/a.root"], capsys)[1] == ""
-
-
-def test_ln_makes_a_symbolic_link_and_readlink_reads_it_back(url, capsys):
-    assert run(["ln", "-s", url + "data/a.root", url + "data/soft"], capsys)[0] == 0
-    _code, out, _ = run(["readlink", url + "data/soft"], capsys)
-    assert out.strip() == "/data/a.root"
-    _code, payload, _ = run(["readlink", "--json", url + "data/soft"], capsys)
-    assert list(json.loads(payload).values()) == ["/data/a.root"]
-
-
-def test_ln_without_s_makes_a_hard_link(url, server, capsys):
-    assert run(["ln", url + "data/a.root", url + "data/hard"], capsys)[0] == 0
-    assert server.contents("/data/hard") == BODY
-
-
-def test_a_link_cannot_cross_endpoints(url, capsys):
-    with FakeServer() as second:
-        code, _out, err = run(["ln", url + "data/a.root", str(second.url) + "elsewhere"], capsys)
-    assert (code, "one endpoint" in err) == (1, True)
-
-
-def test_what_webdav_has_no_link_for_is_reported(dav, capsys):
-    code, _out, err = run(["readlink", str(dav.url) + "d/a.root"], capsys)
-    assert (code, "readlink" in err) == (1, True)
-
-
-# ---------------------------------------------------------------------------
-# xrd-fs: the settings file
-# ---------------------------------------------------------------------------
-
-
-def test_a_named_settings_file_is_read(url, tmp_path, capsys):
-    config = tmp_path / "settings.ini"
-    config.write_text("[defaults]\nusername = fromfile\n")
-    args = fs_cli._parser().parse_args(["ls", "--config", str(config), url])
-    assert config_from(args).username == "fromfile"
-
-
-def test_an_alias_selects_a_section(url, tmp_path):
-    config = tmp_path / "settings.ini"
-    config.write_text("[defaults]\nusername = plain\n[alias eos]\nusername = special\n")
-    argv = ["ls", "--config", str(config), "--alias", "eos", url]
-    assert config_from(fs_cli._parser().parse_args(argv)).username == "special"
-
-
-def test_a_flag_beats_the_settings_file(url, tmp_path):
-    config = tmp_path / "settings.ini"
-    config.write_text("[defaults]\nusername = fromfile\n")
-    argv = ["ls", "--config", str(config), "--user", "fromflag", url]
-    assert config_from(fs_cli._parser().parse_args(argv)).username == "fromflag"
-
-
-# ---------------------------------------------------------------------------
-# xrd-cp: selection and synchronisation
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def local_tree(tmp_path):
-    root = tmp_path / "tree"
-    (root / "sub").mkdir(parents=True)
-    (root / "keep.root").write_bytes(b"keep")
-    (root / "skip.log").write_bytes(b"skip")
-    (root / "sub" / "deep.root").write_bytes(b"deep")
-    return root
-
-
-def test_a_dry_run_says_what_it_would_do_and_does_nothing(local_tree, url, server, capsys):
-    code = cp_cli.main(["-r", "--dry-run", str(local_tree), url + "dry"])
-    out = capsys.readouterr().out
-    assert (code, out.count("->")) == (0, 3)
-    assert not any(path.startswith("/dry") for path in server.files)
-
-
-def test_exclude_and_include_choose_what_travels(local_tree, url, server, capsys):
-    assert cp_cli.main(["-r", "-q", "--exclude", "*.log", str(local_tree), url + "sel"]) == 0
-    assert sorted(p for p in server.files if p.startswith("/sel")) == [
-        "/sel/keep.root",
-        "/sel/sub/deep.root",
-    ]
-
-
-def test_sync_skips_what_is_already_there(local_tree, url, capsys):
-    """The trailing slash pins the target, so the second run has nothing to do."""
-    assert cp_cli.main(["-r", "-q", str(local_tree), url + "syn/"]) == 0
-    code = cp_cli.main(["-r", "--sync", "size", str(local_tree), url + "syn/"])
-    assert (code, capsys.readouterr().out) == (0, "")
-
-
-def test_delete_prunes_the_target(local_tree, url, server, capsys):
-    assert cp_cli.main(["-r", "-q", str(local_tree), url + "del/"]) == 0
-    (local_tree / "skip.log").unlink()
-    assert cp_cli.main(["-r", "-q", "-f", "--delete", str(local_tree), url + "del/"]) == 0
-    assert "/del/tree/skip.log" not in server.files
-    assert "/del/tree/keep.root" in server.files
-
-
-def test_remove_source_moves_the_file(url, tmp_path, server, capsys):
-    source = tmp_path / "moving.bin"
-    source.write_bytes(b"payload")
-    assert cp_cli.main(["-q", "--remove-source", str(source), url + "moved.bin"]) == 0
-    assert server.contents("/moved.bin") == b"payload"
-    assert not source.exists()
-
-
-@pytest.mark.parametrize(
-    "argv",
+    ("values", "typecode", "message"),
     [
-        ["--exclude", "*.log"],
-        ["--include", "*.root"],
-        ["--sync", "size"],
-        ["--delete"],
-        ["--parallel", "4"],
+        ([0, 0, 0, 0], "B", "NULL"),
+        ([255, 255, 255, 255], "B", "0xff"),
+        ([float("nan")] * 4, "f", "non-finite"),
     ],
 )
-def test_the_tree_flags_need_a_tree(url, tmp_path, capsys, argv):
-    code = cp_cli.main([*argv, url + "data/a.root", str(tmp_path / "x")])
-    assert (code, "add -r" in capsys.readouterr().err) == (2, True)
+def test_verify_rejects_a_root_file_whose_payload_is_only_sentinels(
+    registry, mirror, out, capsys, values, typecode, message
+):
+    built(out, mirror, capsys)
+    _replace_with_sentinel_payload(out, values, typecode)
+
+    code, _, err = run(["verify", str(out), "-q"], capsys)
+
+    assert code == 1
+    assert "sentinel-only" in err and message in err
 
 
-def test_parallel_copies_several_files_of_the_tree_at_once(local_tree, url, server, capsys):
-    assert cp_cli.main(["-r", "-q", "--parallel", "3", str(local_tree), url + "par/"]) == 0
-    assert sorted(p for p in server.files if p.startswith("/par")) == [
-        "/par/tree/keep.root",
-        "/par/tree/skip.log",
-        "/par/tree/sub/deep.root",
-    ]
+def test_verify_accepts_a_zero_mask_beside_real_image_data(registry, mirror, out, capsys):
+    built(out, mirror, capsys)
+    target = out / "flowers.root"
+    with datasets_cli.create(str(target)) as root:
+        tree = root.tree(
+            "rows", {"image": ("B", 4), "mask": ("B", 4), "label": "i", "index": "i"}
+        )
+        tree.fill(image=[0, 17, 31, 0], mask=[0, 0, 0, 0], label=0, index=0)
+    document = json.loads((out / "index.json").read_text())
+    document["datasets"] = [datasets_cli._entry("flowers", target, {"rows": 1})]
+    (out / "index.json").write_text(json.dumps(document))
+
+    code, _, err = run(["verify", str(out), "-q"], capsys)
+
+    assert code == 0, err
 
 
-def test_parallel_is_a_count_of_files_so_zero_is_a_usage_error(local_tree, url, capsys):
-    code = cp_cli.main(["-r", "--parallel", "0", str(local_tree), url + "no/"])
-    assert (code, "at least one" in capsys.readouterr().err) == (2, True)
+def test_verify_reports_an_unloadable_root_payload_without_crashing(
+    registry, mirror, out, capsys
+):
+    index = built(out, mirror, capsys)
+    target = out / "flowers.root"
+    target.write_bytes(b"not a ROOT file")
+    entry = index["datasets"][0]
+    entry["bytes"] = target.stat().st_size
+    entry["adler32"] = datasets_cli.checksum_file("adler32", datasets_cli._chunks(target))
+    (out / "index.json").write_text(json.dumps(index))
+
+    code, _, err = run(["verify", str(out), "-q"], capsys)
+
+    assert code == 1
+    assert "ROOT payload cannot be loaded" in err
 
 
-def test_the_in_flight_window_reaches_the_copy(url, tmp_path, capsys, monkeypatch):
-    seen = []
-    real = cp_cli.copy
+def test_verify_rejects_a_structured_root_file_with_no_data_rows(
+    registry, mirror, out, capsys
+):
+    built(out, mirror, capsys)
+    target = out / "flowers.root"
+    with datasets_cli.create(str(target)) as root:
+        root.tree("rows", {"features": ("f", 4), "label": "i", "index": "i"})
+    document = json.loads((out / "index.json").read_text())
+    document["datasets"] = [datasets_cli._entry("flowers", target, {"rows": 0})]
+    (out / "index.json").write_text(json.dumps(document))
 
-    def spy(*args, config, **options):
-        seen.append(config.in_flight)
-        return real(*args, config=config, **options)
+    code, _, err = run(["verify", str(out), "-q"], capsys)
 
-    monkeypatch.setattr(cp_cli, "copy", spy)
-    target = tmp_path / "f"
-    assert cp_cli.main(["--in-flight", "5", "-q", url + "data/a.root", str(target)]) == 0
-    assert (seen, target.read_bytes()) == ([5], BODY)
-
-
-def test_the_window_is_a_count_of_chunks_so_zero_is_a_usage_error(url, tmp_path, capsys):
-    code = cp_cli.main(["--in-flight", "0", url + "data/a.root", str(tmp_path / "f")])
-    assert (code, "at least one" in capsys.readouterr().err) == (2, True)
+    assert code == 1
+    assert "contains no data rows" in err
 
 
-def test_the_stripe_count_reaches_the_copy(url, tmp_path, capsys, monkeypatch):
-    """The engine has always been able to move one file over several
-    connections; this is the flag that asks it to."""
-    seen = []
-    real = cp_cli.copy
-
-    def spy(*args, config, **options):
-        seen.append(config.parallel_chunks)
-        return real(*args, config=config, **options)
-
-    monkeypatch.setattr(cp_cli, "copy", spy)
-    target = tmp_path / "f"
-    assert cp_cli.main(["--stripes", "3", "-q", url + "data/a.root", str(target)]) == 0
-    assert (seen, target.read_bytes()) == ([3], BODY)
+def test_verify_catches_a_missing_file(registry, mirror, out, capsys):
+    built(out, mirror, capsys)
+    (out / "flowers.root").unlink()
+    code, _, err = run(["verify", str(out)], capsys)
+    assert code == 1
+    assert "missing" in err
 
 
-def test_stripes_are_a_count_of_connections_so_zero_is_a_usage_error(url, tmp_path, capsys):
-    code = cp_cli.main(["--stripes", "0", url + "data/a.root", str(tmp_path / "f")])
-    assert (code, "at least one" in capsys.readouterr().err) == (2, True)
+def test_verify_catches_a_file_of_the_wrong_size(registry, mirror, out, capsys):
+    built(out, mirror, capsys)
+    with (out / "flowers.root").open("ab") as handle:
+        handle.write(b"tail")
+    code, _, err = run(["verify", str(out)], capsys)
+    assert code == 1
+    assert "bytes on disk" in err
 
 
-def test_the_stream_count_reaches_the_copy(url, tmp_path, capsys, monkeypatch):
-    """Stripes and streams are different questions: one is how many spans of
-    the file move at once, the other how many connections each one rides."""
-    seen = []
-    real = cp_cli.copy
-
-    def spy(*args, config, **options):
-        seen.append(config.data_streams)
-        return real(*args, config=config, **options)
-
-    monkeypatch.setattr(cp_cli, "copy", spy)
-    target = tmp_path / "f"
-    assert cp_cli.main(["--streams", "3", "-q", url + "data/a.root", str(target)]) == 0
-    assert (seen, target.read_bytes()) == ([3], BODY)
+def test_verify_catches_a_flipped_byte(registry, mirror, out, capsys):
+    built(out, mirror, capsys)
+    target = out / "flowers.root"
+    raw = bytearray(target.read_bytes())
+    raw[-1] ^= 0xFF
+    target.write_bytes(raw)
+    code, _, err = run(["verify", str(out)], capsys)
+    assert code == 1
+    assert "checksum" in err
 
 
-def test_no_extra_streams_is_a_request_rather_than_a_mistake(url, tmp_path, monkeypatch):
-    """Unlike the counts above, nought means something here - the control link
-    on its own - so it has to reach the copy instead of being refused."""
-    seen = []
-    real = cp_cli.copy
-
-    def spy(*args, config, **options):
-        seen.append(config.data_streams)
-        return real(*args, config=config, **options)
-
-    monkeypatch.setattr(cp_cli, "copy", spy)
-    target = tmp_path / "f"
-    assert cp_cli.main(["--streams", "0", "-q", url + "data/a.root", str(target)]) == 0
-    assert (seen, target.read_bytes()) == ([0], BODY)
+def test_verify_json_reports_the_problems_by_name(registry, mirror, out, capsys):
+    built(out, mirror, capsys)
+    (out / "flowers.root").unlink()
+    code, output, _ = run(["verify", str(out), "--json"], capsys)
+    assert code == 1
+    assert json.loads(output) == {"checked": 1, "problems": {"flowers": "the file is missing"}}
 
 
-def test_a_negative_stream_count_is_a_usage_error(url, tmp_path, capsys):
-    code = cp_cli.main(["--streams", "-1", url + "data/a.root", str(tmp_path / "f")])
-    assert (code, "not negative" in capsys.readouterr().err) == (2, True)
+# --- site -------------------------------------------------------------------
 
 
-def test_continue_carries_on_from_a_partial_download(url, tmp_path, capsys):
-    target = tmp_path / "partial.root"
-    target.write_bytes(b"hello ")
-    assert cp_cli.main(["-c", "--json", url + "data/a.root", str(target)]) == 0
-    assert target.read_bytes() == b"hello world"
-    record = json.loads(capsys.readouterr().out)[0]
-    assert (record["resumed_at"], record["size"]) == (6, 5)
+def test_site_writes_the_page_and_every_serving_config(registry, mirror, out, capsys):
+    built(out, mirror, capsys)
+    code, output, _ = run(["site", str(out), "--base-url", "https://data.example.org/"], capsys)
+    assert code == 0
+    page = (out / "index.html").read_text()
+    _assert_site_catalogue(page)
+    _assert_site_example(page)
+    _assert_site_indexing(out)
+    _assert_site_nginx(out)
+    _assert_site_brix(out)
+    assert "ExecStart" in (out / "xrd-datasets.service").read_text()
+    assert "XRD_CATALOGUE" in (out / "README.md").read_text()
+    assert "index.html" in output
 
 
-@pytest.mark.parametrize("flag", ["--tpc", "-n"])
-def test_continue_needs_a_target_it_is_allowed_to_extend(url, tmp_path, capsys, flag):
-    code = cp_cli.main(["-c", flag, url + "data/a.root", str(tmp_path / "x")])
-    assert (code, "--continue" in capsys.readouterr().err) == (2, True)
+def _assert_site_catalogue(page):
+    _assert_site_dataset_content(page)
+    _assert_site_licensing(page)
+    assert 'type="application/ld+json"' in page and '"DataCatalog"' in page
+    assert '"creator":[{"@type":"Person","name":"Ada Dataset"}]' in page
+    assert '"publisher":{"@type":"Organization","name":"Example Science Lab"}' in page
+    assert '<article class="dataset-card"' in page  # indexable without JavaScript
+    assert 'id="modality"' in page and 'id="licence"' in page and 'id="sort"' in page
+    assert 'id="shown"' in page and "streamable ROOT archive" in page
+    assert 'data-size="' in page and 'data-rows="' in page
+    assert 'class="skip-link"' in page and 'aria-label="Primary navigation"' in page
+    assert 'role="search" aria-label="Filter and sort datasets"' in page
+    assert ".dataset-card::before" in page and "ROOT transformation" in page
+    assert "prefers-reduced-motion" in page and 'event.key === "/"' in page
 
 
-@pytest.mark.parametrize("flag", ["--dry-run", "--remove-source"])
-def test_a_third_party_copy_cannot_pretend(url, tmp_path, capsys, flag):
-    code = cp_cli.main(["--tpc", flag, url + "data/a.root", url + "b.root"])
-    assert (code, "--tpc" in capsys.readouterr().err) == (2, True)
+def _assert_site_dataset_content(page):
+    assert "flowers" in page  # the index is embedded, the page works from file://
+    assert "XRD_CATALOGUE=https://data.example.org" in page
+    assert "Canonical origin" in page
+    assert "Source: Example Archive" in page and "Mirror: Teaching mirror" in page
+    assert "Citation" in page
+    assert "Download " in page and "flowers.root" in page
+    assert FLOWERS.source in page
+    assert FLOWERS.transformation_summary() in page
+
+
+def _assert_site_licensing(page):
+    assert "canonical licence" in page
+    assert "transformation into ROOT" in page
+    assert "https://creativecommons.org/publicdomain/zero/1.0/" in page
+
+
+def _assert_site_example(page):
+    assert "python3 -m venv .venv" in page
+    assert "pip install pyxrootdclient torch" in page and "torch.optim.Adam" in page
+    assert "&lt; 2 GB" in page and "default per-dataset ceiling" in page
+
+
+def _assert_site_indexing(out):
+    detail = (out / "datasets" / "flowers.html").read_text()
+    assert 'rel="canonical"' in detail and "Canonical origin" in detail
+    assert "datasets/flowers.html" in (out / "sitemap.xml").read_text()
+    assert "Sitemap: https://data.example.org/sitemap.xml" in (out / "robots.txt").read_text()
+
+
+def _assert_site_nginx(out):
+    nginx = (out / "nginx.conf").read_text()
+    assert str(out.resolve()) in nginx
+    assert "listen 8080" in nginx and "server_name data.example.org" in nginx
+    assert "location ~ (^|/)\\." in nginx  # a source cache under the root stays private
+    assert "application/x-root root" in nginx and "Accept-Ranges bytes" in nginx
+    assert "limit_except GET HEAD" in nginx and "Content-Security-Policy" in nginx
+
+
+def _assert_site_brix(out):
+    brix = (out / "brix.conf").read_text()
+    assert "brix_root" in brix and "brix_webdav" in brix
+    assert "brix_allow_write" not in brix  # read-only on every plane
+
+
+def test_a_publisher_text_citation_is_shown_as_text_and_never_made_an_href():
+    made = {
+        "source": "https://example.invalid/source",
+        "origin": "https://example.invalid/source",
+        "origin_kind": "source record",
+        "repository": "Example Archive",
+        "citation": "Credit the original collector, Alice Example.",
+    }
+    links = datasets_cli._provenance_links(made)
+    detail = datasets_cli._citation_detail(made)
+    assert "Credit the original collector" not in links
+    assert "Credit the original collector" in detail
+    assert "Dataset record" in links and "Repository: Example Archive" in links
+
+
+def test_an_oversized_index_makes_the_site_disclose_the_opt_in_policy(
+    registry, mirror, out, capsys
+):
+    index = built(out, mirror, capsys)
+    index["datasets"][0]["source_bytes"] = 2_000_000_000
+    (out / "index.json").write_text(json.dumps(index))
+    code, _, err = run(["site", str(out)], capsys)
+    assert code == 0, err
+    page = (out / "index.html").read_text()
+    assert "No cap" in page and "explicit oversized build" in page
+
+
+def test_the_page_advertises_the_protocol_and_where_it_answers(registry, mirror, out, capsys):
+    """A visitor should be able to tell what this is served over, and why."""
+    built(out, mirror, capsys)
+    run(["site", str(out), "--base-url", "https://data.example.org"], capsys)
+    page = (out / "index.html").read_text()
+    assert "XRootD" in page and "WLCG" in page and "OSG" in page
+    assert "root://data.example.org//mnist.root" in page  # the native plane
+    assert "https://data.example.org/mnist.root" in page  # and the HTTP one
+    assert "cache=True" in page  # and the local copy, for those who want one
+
+
+def test_the_root_endpoint_can_live_somewhere_else(registry, mirror, out, capsys):
+    built(out, mirror, capsys)
+    run(
+        [
+            "site",
+            str(out),
+            "--base-url",
+            "https://data.example.org",
+            "--root-url",
+            "root://xrootd.example.org:1094/",
+        ],
+        capsys,
+    )
+    page = (out / "index.html").read_text()
+    assert "root://xrootd.example.org:1094//mnist.root" in page
+    assert "root://data.example.org" not in page
+
+
+def test_site_generates_a_named_port_80_virtual_host_for_production(
+    registry, mirror, out, capsys
+):
+    built(out, mirror, capsys)
+    code, _, err = run(
+        [
+            "site",
+            str(out),
+            "--base-url",
+            "https://ai.edi.scotgrid.ac.uk",
+            "--nginx-port",
+            "80",
+            "--title",
+            "ScotGrid AI open datasets",
+        ],
+        capsys,
+    )
+
+    assert code == 0, err
+    page = (out / "index.html").read_text()
+    nginx = (out / "nginx.conf").read_text()
+    assert "ScotGrid AI open datasets" in page
+    assert 'rel="canonical" href="https://ai.edi.scotgrid.ac.uk/"' in page
+    assert "listen 80;" in nginx and "listen [::]:80;" in nginx
+    assert "server_name ai.edi.scotgrid.ac.uk;" in nginx
+
+
+@pytest.mark.parametrize(
+    "value", ["ftp://data.example.org", "https://user@data.example.org", "not a URL"]
+)
+def test_site_rejects_a_non_public_http_base_url(value):
+    with pytest.raises(ValueError, match="public base URL"):
+        datasets_cli._public_base_url(value)
+
+
+def test_the_readme_says_both_planes_and_the_cache(registry, mirror, out, capsys):
+    built(out, mirror, capsys)
+    run(["site", str(out), "--base-url", "https://data.example.org"], capsys)
+    readme = (out / "README.md").read_text()
+    assert "root://data.example.org//iris.root" in readme
+    assert 'load("iris", cache=True)' in readme
+
+
+def test_site_json_lists_what_it_wrote(registry, mirror, out, capsys):
+    built(out, mirror, capsys)
+    code, output, _ = run(["site", str(out), "--json"], capsys)
+    assert code == 0
+    assert "nginx.conf" in json.loads(output)["written"]
+
+
+def test_site_before_build_says_what_is_missing(out, capsys):
+    out.mkdir()
+    code, _, err = run(["site", str(out)], capsys)
+    assert code == 1
+    assert "index.json" in err

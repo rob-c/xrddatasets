@@ -7,7 +7,7 @@ import zipfile
 
 import pytest
 
-from xrd.root._uci_large import load
+from xrddatasets._uci_large import load
 
 
 def nested_zip(files):

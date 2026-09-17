@@ -11,18 +11,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from xrdml import visualize_2d
+from xrdroot import open_root
 
-from xrd.ml import visualize_2d
-from xrd.root import datasets as datasets_module
-from xrd.root import open_root
-from xrd.root._jarvis_physics import (
+from xrddatasets import DATASETS, Large, convert
+from xrddatasets import catalogue as datasets_module
+from xrddatasets._jarvis_physics import (
     DERIVED_TARGETS,
     DIRECT_TARGETS,
     JARVIS_PHYSICS,
     SPLIT_TREES,
 )
-from xrd.root._open_large import load
-from xrd.root.datasets import DATASETS, Large, _conversion_cache_name, convert
+from xrddatasets._open_large import load
+from xrddatasets.catalogue import _conversion_cache_name
 
 
 def _source(path: Path, rows: list[dict[str, Any]]) -> None:

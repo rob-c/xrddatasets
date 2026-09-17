@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from xrdroot import open_root
 
-from xrd.root import open_root
-from xrd.root._open_large import load
-from xrd.root._physics_vision import (
+from xrddatasets import DATASETS, convert
+from xrddatasets._open_large import load
+from xrddatasets._physics_vision import (
     GALAXY10_CLASSES,
     MARS_CLASSES,
     MEDMNIST_SPECS,
@@ -21,8 +22,7 @@ from xrd.root._physics_vision import (
     SWEFIL_ROLES,
     SWEFIL_SIDE,
 )
-from xrd.root._swefil_manifest import SWEFIL_FILES, SWEFIL_SOURCE_BYTES
-from xrd.root.datasets import DATASETS, convert
+from xrddatasets._swefil_manifest import SWEFIL_FILES, SWEFIL_SOURCE_BYTES
 
 MappingForTest = dict[str, object]
 

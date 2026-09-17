@@ -3,12 +3,11 @@
   "paths": [
     "src",
     "tools",
-    "tests",
-    "benchmarks"
+    "tests"
   ],
   "exclude": [
-    "src/xrd/root/_hub_tables.py",
-    "src/xrd/root/_uci_tables.py"
+    "src/xrddatasets/_hub_tables.py",
+    "src/xrddatasets/_uci_tables.py"
   ],
   "limits": {
     "ccn": 10,

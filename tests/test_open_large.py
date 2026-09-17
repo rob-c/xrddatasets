@@ -10,10 +10,11 @@ import wave
 import zipfile
 
 import pytest
+from xrdroot import open_root
 
-from xrd.root import _open_large as open_large_module
-from xrd.root import open_root
-from xrd.root._open_large import (
+import xrddatasets._open_large as open_large_module
+from xrddatasets import convert
+from xrddatasets._open_large import (
     ALLSKY_CLASSES,
     ALLSKY_SIDE,
     BIRDSET_CLASSES,
@@ -25,7 +26,6 @@ from xrd.root._open_large import (
     SOD_WIDTH,
     load,
 )
-from xrd.root.datasets import convert
 
 
 def _wav(samples: bytes, *, rate: int = 16_000) -> bytes:

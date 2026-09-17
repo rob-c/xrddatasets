@@ -8,11 +8,12 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
+from xrdml import visualize_2d
+from xrdroot import open_root
 
-from xrd.ml import visualize_2d
-from xrd.root import _alex_mp20 as alex_module
-from xrd.root import open_root
-from xrd.root._alex_mp20 import (
+import xrddatasets._alex_mp20 as alex_module
+from xrddatasets import DATASETS, Large, convert
+from xrddatasets._alex_mp20 import (
     ALEX_MP20,
     DERIVED_TARGETS,
     DIRECT_TARGETS,
@@ -22,7 +23,7 @@ from xrd.root._alex_mp20 import (
     TARGETS,
     load,
 )
-from xrd.root.datasets import DATASETS, Large, _conversion_cache_name, convert
+from xrddatasets.catalogue import _conversion_cache_name
 
 
 def _row(target: Any = 1.25) -> dict[str, Any]:

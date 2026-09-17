@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from xrdroot import open_root
 
-from xrd.root import open_root
-from xrd.root._condensed_matter import (
+from xrddatasets import DATASETS, convert
+from xrddatasets._condensed_matter import (
     AFM_CHANNELS,
     CONDENSED_MATTER,
     JARVIS_CLASSES,
@@ -27,8 +28,7 @@ from xrd.root._condensed_matter import (
     _wse2_bounds,
     _wse2_row,
 )
-from xrd.root._open_large import load
-from xrd.root.datasets import DATASETS, convert
+from xrddatasets._open_large import load
 
 
 def _picture(mode: str, size: tuple[int, int], value: Any, kind: str = "PNG") -> bytes:

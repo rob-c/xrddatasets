@@ -58,9 +58,9 @@ def test_the_manifest_marks_only_the_uci_adapters_already_in_the_registry() -> N
     source = "\n".join(
         (ROOT / path).read_text()
         for path in (
-            "src/xrd/root/datasets.py",
-            "src/xrd/root/_uci_tables.py",
-            "src/xrd/root/_uci_large.py",
+            "src/xrddatasets/catalogue.py",
+            "src/xrddatasets/_uci_tables.py",
+            "src/xrddatasets/_uci_large.py",
         )
     )
     implemented = {

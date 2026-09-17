@@ -10,10 +10,10 @@ from types import SimpleNamespace
 
 from tools.hub_catalogue import OPEN_LICENCES
 
-from xrd.root import _hub_open as hub_module
-from xrd.root._hub_open import load
-from xrd.root._hub_tables import HUB_OPEN
-from xrd.root.datasets import DATASETS, licence_url, redistributable
+import xrddatasets._hub_open as hub_module
+from xrddatasets import DATASETS, licence_url, redistributable
+from xrddatasets._hub_open import load
+from xrddatasets._hub_tables import HUB_OPEN
 
 ROOT = Path(__file__).parents[1]
 

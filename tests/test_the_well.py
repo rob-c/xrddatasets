@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from xrdml import visualize_2d
+from xrdroot import open_root
 
-from xrd.ml import visualize_2d
-from xrd.root import open_root
-from xrd.root._the_well import (
+from xrddatasets import DATASETS, Large, convert
+from xrddatasets._the_well import (
     EXTRA_SOURCES,
     PIXELS,
     SOURCES,
@@ -21,7 +22,7 @@ from xrd.root._the_well import (
     _frame,
     load,
 )
-from xrd.root.datasets import DATASETS, Large, _conversion_cache_name, convert
+from xrddatasets.catalogue import _conversion_cache_name
 
 
 @pytest.fixture

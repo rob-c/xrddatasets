@@ -15,7 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-AGENT = "PyXRootDClient UCI normalized-table generator"
+AGENT = "xrdclient UCI normalized-table generator"
 MISSING = {"", "*", "?", "NA", "na", "N/A", "nan", "NaN", "NaNN", "null"}
 
 

@@ -2,7 +2,7 @@
 """Inventory UCI's catalogue and rank its directly hosted source archives.
 
 The generated JSON is input data for the checked-in UCI selection manifest;
-it is deliberately not imported by the library, so importing :mod:`xrd` never
+it is deliberately not imported by the library, so importing :mod:`xrdclient` never
 depends on the network or on UCI's catalogue remaining unchanged.
 """
 
@@ -20,7 +20,7 @@ from typing import Any
 
 LIST = "https://archive.ics.uci.edu/api/datasets/list"
 DETAIL = "https://archive.ics.uci.edu/api/dataset?id={id}"
-AGENT = "PyXRootDClient UCI catalogue inventory"
+AGENT = "xrdclient UCI catalogue inventory"
 
 
 def _json(url: str) -> Any:

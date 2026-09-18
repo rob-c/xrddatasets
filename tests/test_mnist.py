@@ -13,7 +13,7 @@ import io
 import struct
 
 import pytest
-from xrd.testing.http import FakeDAVServer
+from xrdclient.testing.http import FakeDAVServer
 from xrdroot import create, open_root
 
 from xrddatasets.mnist import COLUMNS, FILES, MIRROR, PIXELS, SIDE, convert, fetch, read_idx

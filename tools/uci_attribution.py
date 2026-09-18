@@ -15,7 +15,7 @@ from typing import Any
 
 DETAIL = "https://archive.ics.uci.edu/api/dataset?id={uci_id}"
 PATTERN = re.compile(r"https://archive\.ics\.uci\.edu/dataset/(\d+)")
-AGENT = "PyXRootDClient UCI attribution audit"
+AGENT = "xrdclient UCI attribution audit"
 
 
 def _json(url: str) -> Any:

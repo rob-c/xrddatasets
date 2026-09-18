@@ -27,7 +27,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-AGENT = "PyXRootDClient open Hub dataset inventory"
+AGENT = "xrdclient open Hub dataset inventory"
 HUB = "https://huggingface.co/api/datasets"
 VIEWER = "https://datasets-server.huggingface.co"
 

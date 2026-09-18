@@ -49,12 +49,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
-from xrd._log import get_logger
-from xrd.cli import ERROR, OK, common_flags, config_from, dumps, fail
-from xrd.config import Config
-from xrd.crypto import checksum_file
-from xrd.errors import XRootDError
-from xrd.types import human_bytes
+from xrdclient._log import get_logger
+from xrdclient.cli import ERROR, OK, common_flags, config_from, dumps, fail
+from xrdclient.config import Config
+from xrdclient.crypto import checksum_file
+from xrdclient.errors import XRootDError
+from xrdclient.types import human_bytes
 from xrdroot import open_root
 from xrdroot.writer import create
 
@@ -1407,7 +1407,7 @@ machinery pointed at machine-learning data: the same protocol, the same
 client, the same wide-area performance.</p>
 
 <p>Stream one straight into a training loop. Nothing is downloaded first:</p>
-<pre>pip install pyxrootdclient
+<pre>pip install xrdclient
 export XRD_CATALOGUE=$base_url
 
 python -c '
@@ -1440,8 +1440,8 @@ it against this catalogue, and reads from your own disk ever after.</p>
 </tbody>
 </table>
 
-<p class="muted">Served by <a href="https://github.com/rob-c/PyXRootDClient"
->PyXRootDClient</a> against a BriX-Cache endpoint, read-only on every plane.
+<p class="muted">Served by <a href="https://github.com/rob-c/xrdclient"
+>xrdclient</a> against a BriX-Cache endpoint, read-only on every plane.
 Each file carries its origin, licence terms and conversion summary in its
 <code>about</code> key; the same is recorded in <a href="index.json"
 >index.json</a>, which is how the name lookup above works. The table links to
@@ -2257,7 +2257,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 <span class="comment"># 2. Install PyXRootD and PyTorch</span>
-python -m pip install pyxrootdclient torch
+python -m pip install xrdclient torch
 export XRD_CATALOGUE=$base_url
 
 <span class="comment"># 3. Stream Fashion-MNIST and train</span>
@@ -2314,7 +2314,7 @@ PY</code></pre>
     <p class="index-note">Built $built · Machine-readable metadata: <a href="index.json">index.json</a> · Google-compatible <a href="sitemap.xml">sitemap</a> · every ROOT file includes the same provenance in its <code>about</code> key.</p>
   </section>
 </main>
-<footer class="site-footer"><strong>PyXRootDClient</strong><span>Pure-Python access to XRootD, HTTP ranges and ROOT data for training anywhere.</span><a href="https://github.com/rob-c/PyXRootDClient" rel="noopener">Source on GitHub →</a></footer>
+<footer class="site-footer"><strong>xrdclient</strong><span>Pure-Python access to XRootD, HTTP ranges and ROOT data for training anywhere.</span><a href="https://github.com/rob-c/xrdclient" rel="noopener">Source on GitHub →</a></footer>
 <script>$page_script</script>
 </body>
 </html>
@@ -2474,7 +2474,7 @@ WLCG. Training data streams the same way the physics does.
 
     python3 -m venv .venv
     source .venv/bin/activate
-    python -m pip install pyxrootdclient torch
+    python -m pip install xrdclient torch
     export XRD_CATALOGUE=$base_url
 
     python -c 'import xrdml; print(xrdml.load("iris"))'

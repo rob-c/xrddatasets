@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import xrd.ml
+import xrdclient.ml
 
 
 def arguments() -> argparse.Namespace:
@@ -43,7 +43,7 @@ def arguments() -> argparse.Namespace:
 def main() -> None:
     """Read the selected entry and draw both image representations."""
     options = arguments()
-    image = xrd.ml.load_image_2d(
+    image = xrdclient.ml.load_image_2d(
         options.source,
         tree=options.tree,
         entry=options.entry,

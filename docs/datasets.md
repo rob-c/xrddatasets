@@ -717,7 +717,7 @@ fixed-width UTF-8 bytes with a companion length, missing floats become NaN,
 `ClassLabel` metadata becomes an integer, and one `rows` TTree is written per
 official split. The crowd-code corpus is additionally partitioned by power-of-two
 UTF-8 text length so outlier source rows cannot force a multi-gigabyte fixed-width
-ROOT file. The generated [selection manifest](https://github.com/rob-c/PyXRootDClient/blob/main/catalogues/hub-open.json)
+ROOT file. The generated [selection manifest](https://github.com/rob-c/xrdclient/blob/main/catalogues/hub-open.json)
 records every repository, revision, canonical licence URL, source size and
 split. Ambiguous `public` metadata, gated repositories, incomplete conversions
 and nested schemas are rejected rather than guessed.
@@ -913,7 +913,7 @@ deduplication reduces the actual source fetch to about 193.10 GB; ROOT output
 and temporary space must still be measured on the production filesystem.
 
 ```console
-$ pip install 'pyxrootdclient[datasets]'
+$ pip install 'xrdclient[datasets]'
 ```
 
 Nothing is redistributed here. Each set is fetched from whoever publishes it,
@@ -1053,7 +1053,7 @@ validation partition; the 48-row test tree keeps 12 observations from each of
 four independent imagers.
 
 ```console
-$ python -m pip install 'pyxrootdclient[datasets]'
+$ python -m pip install 'xrdclient[datasets]'
 $ xrd-datasets build /nfs/datasets \
     --only swefil --only galaxy10_sdss --only mars_surface_images \
     --only pathmnist --only organmnist3d \

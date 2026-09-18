@@ -2,9 +2,9 @@
 
 The maintainability test turns five complementary views of function complexity
 into one report and one absolute gate. It scans the handwritten Python under
-`src`, `tools`, `tests` and `benchmarks`. Generated dataset table modules are
-excluded in `maintainability.json`: reviewing a generated declaration as if it
-were control-flow code would not help a maintainer.
+`src`, `tools` and `tests`. The generated dataset table modules are excluded
+in `maintainability.json`: reviewing a generated declaration as if it were
+control-flow code would not help a maintainer.
 
 Install the development tools and run a report from the repository root:
 

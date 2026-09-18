@@ -10,7 +10,7 @@ shelf. It contains three collections:
   data, excluding empty ZIPs and archives that contain only a link or README.
 
 The collections overlap. Their union is 455 UCI records: 177 already have a
-schema-aware converter in `xrd.root.datasets`, while 278 require new adapters.
+schema-aware converter in `xrdclient.root.datasets`, while 278 require new adapters.
 An entry's `implemented` field records that distinction; being selected does
 not pretend that an arbitrary source archive is already safe to build.
 

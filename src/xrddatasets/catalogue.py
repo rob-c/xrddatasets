@@ -25,11 +25,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
-from xrd._compat import SLOTS, zip_strict
-from xrd._log import get_logger
-from xrd.config import Config
-from xrd.errors import TransientError
-from xrd.url import parse
+from xrdclient._compat import SLOTS, zip_strict
+from xrdclient._log import get_logger
+from xrdclient.config import Config
+from xrdclient.errors import TransientError
+from xrdclient.url import parse
 from xrdroot.writer import WritableFile, create
 
 from ._hub_tables import HUB_OPEN
@@ -335,7 +335,7 @@ def fetch(source: Any, *, config: Any = None) -> bytes:
     if url.is_local:
         with open(url.path, "rb") as handle:
             return handle.read()
-    from xrd.io import open_url
+    from xrdclient.io import open_url
 
     settings = config or Config()
     for attempt in range(settings.connect_retries + 1):
@@ -470,7 +470,7 @@ def _copy_source(source: Any, url: Any, handle: Any, config: Any) -> None:
         while chunk := source.read(1 << 20):
             handle.write(chunk)
         return
-    from xrd.io import open_url
+    from xrdclient.io import open_url
 
     assert url is not None
     with open_url(url, "rb", buffering=0, config=config) as remote:

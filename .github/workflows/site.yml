@@ -2,7 +2,7 @@ name: Datasets site
 
 # The public datasets directory, rebuilt from this repository on demand and
 # republished as one artifact: every redistributable dataset converted to
-# ROOT, the index that lets ``xrd.ml.load("mnist")`` find it by name, and
+# ROOT, the index that lets ``xrdclient.ml.load("mnist")`` find it by name, and
 # the page and server configuration that put it on the web.
 #
 # Run by hand (pick the datasets and the URL), or by pushing a ``site-*``

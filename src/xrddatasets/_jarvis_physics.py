@@ -17,7 +17,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from xrd._compat import zip_strict
+from xrdclient._compat import zip_strict
 
 from ._condensed_matter import ATOMIC_NUMBER
 

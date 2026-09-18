@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-AGENT = "PyXRootDClient UCI catalogue selection"
+AGENT = "xrdclient UCI catalogue selection"
 DATA_SUFFIXES = {
     ".arff",
     ".bmp",

@@ -16,8 +16,8 @@ and read on the machine doing the converting, so the threat model here is
 compromised, a mirror was, or the network in between was.
 
 Credentials, TLS and the transport belong to
-[PyXRootDClient](https://github.com/rob-c/xrd), whose
-[SECURITY.md](https://github.com/rob-c/xrd/blob/main/SECURITY.md) is the
+[xrdclient](https://github.com/rob-c/xrdclient), whose
+[SECURITY.md](https://github.com/rob-c/xrdclient/blob/main/SECURITY.md) is the
 document for those; parsing the ROOT files this writes belongs to
 [xrdroot](https://github.com/rob-c/xrdroot).
 

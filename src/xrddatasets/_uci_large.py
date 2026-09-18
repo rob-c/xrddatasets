@@ -874,7 +874,7 @@ def _cuffless_entries(path: Path) -> Rows:
     except ModuleNotFoundError:
         raise ValueError(
             "Cuff-Less Blood Pressure needs the datasets extra: "
-            "pip install 'pyxrootdclient[datasets]'"
+            "pip install 'xrdclient[datasets]'"
         ) from None
     archive = zipfile.ZipFile(path)
     index = 0
@@ -1053,7 +1053,7 @@ def _ppg_numpy() -> Any:
         return importlib.import_module("numpy")
     except ModuleNotFoundError:
         raise ValueError(
-            "PPG-DaLiA needs the datasets extra: pip install 'pyxrootdclient[datasets]'"
+            "PPG-DaLiA needs the datasets extra: pip install 'xrdclient[datasets]'"
         ) from None
 
 
@@ -1369,7 +1369,7 @@ def _humanitarian_module() -> Any:
         return importlib.import_module("PIL.Image")
     except ModuleNotFoundError:
         raise ValueError(
-            "Multimodal Damage needs the datasets extra: pip install 'pyxrootdclient[datasets]'"
+            "Multimodal Damage needs the datasets extra: pip install 'xrdclient[datasets]'"
         ) from None
 
 

@@ -3,7 +3,7 @@
 The same streaming as the other two, with the pictures given back their shape:
 a row of 784 numbers becomes the 1x28x28 that a convolution wants.
 
-    $ python -m xrd.testing datasets --port 21094 --pattern 'fashion_mnist.root'
+    $ python -m xrdclient.testing datasets --port 21094 --pattern 'fashion_mnist.root'
     $ python examples/fashion_mnist_cnn.py root://127.0.0.1:21094//fashion_mnist.root
 """
 
@@ -16,9 +16,9 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-import xrd
-from xrd.root import open_root
-from xrd.root.ml import mixed
+import xrdclient
+from xrdclient.root import open_root
+from xrdclient.root.ml import mixed
 
 URL = sys.argv[1] if len(sys.argv) > 1 else "root://127.0.0.1:21094//fashion_mnist.root"
 STEP, BATCH, EPOCHS = 512, 256, 5
@@ -48,7 +48,7 @@ with open_root(URL) as handle:
         nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
         nn.Flatten(), nn.Linear(32 * 7 * 7, 10)).to(device)
     optimiser = torch.optim.Adam(model.parameters(), lr=1e-3)
-    megabytes = xrd.Path(URL).stat().st_size / 1e6
+    megabytes = xrdclient.Path(URL).stat().st_size / 1e6
     names = [name.removeprefix("train_") for name in handle.trees() if name.startswith("train_")]
     print(f"{URL}: {megabytes:,.0f} MB, {len(names)} classes {', '.join(names[:3])} ..., "
           f"on {device}")

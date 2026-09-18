@@ -13,7 +13,7 @@ import threading
 import time
 
 import pytest
-from xrd.config import Config
+from xrdclient.config import Config
 from xrdroot import Branch, open_root
 
 from xrddatasets import DATASETS, Table
@@ -769,7 +769,7 @@ def _assert_site_licensing(page):
 
 def _assert_site_example(page):
     assert "python3 -m venv .venv" in page
-    assert "pip install pyxrootdclient torch" in page and "torch.optim.Adam" in page
+    assert "pip install xrdclient torch" in page and "torch.optim.Adam" in page
     assert "&lt; 2 GB" in page and "default per-dataset ceiling" in page
 
 

@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 
 import pytest
-from xrd import Config, TransientError
+from xrdclient import Config, TransientError
 from xrdroot import open_root
 from xrdroot.writer import create
 
@@ -3896,7 +3896,7 @@ def test_a_whole_source_fetch_retries_a_transient_gateway_failure(monkeypatch):
         attempts.append(None)
         return Remote(len(attempts) == 1)
 
-    monkeypatch.setattr("xrd.io.open_url", open_url)
+    monkeypatch.setattr("xrdclient.io.open_url", open_url)
 
     raw = datasets_module.fetch(
         "https://publisher.example/archive",
@@ -3941,7 +3941,7 @@ def test_a_cached_remote_source_resumes_a_part_and_recovers_a_dropped_read(
             return chunk
 
     remote = InterruptedRemote()
-    monkeypatch.setattr("xrd.io.open_url", lambda *_args, **_kwargs: remote)
+    monkeypatch.setattr("xrdclient.io.open_url", lambda *_args, **_kwargs: remote)
 
     path, temporary = datasets_module._fetch_file(
         "https://publisher.example/archive",
@@ -3975,7 +3975,7 @@ def test_an_exhausted_remote_retry_keeps_the_download_part(tmp_path, monkeypatch
         def read(self, _maximum):
             raise TransientError("publisher connection dropped", committed=3)
 
-    monkeypatch.setattr("xrd.io.open_url", lambda *_args, **_kwargs: BrokenRemote())
+    monkeypatch.setattr("xrdclient.io.open_url", lambda *_args, **_kwargs: BrokenRemote())
 
     with pytest.raises(TransientError, match="publisher connection dropped"):
         datasets_module._fetch_file(

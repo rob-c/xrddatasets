@@ -41,7 +41,7 @@ need none of it.
 That brings [`xrdml`](https://github.com/rob-c/xrdml) — the loader these files
 are written for — and, under it,
 [`xrdroot`](https://github.com/rob-c/xrdroot) for the format and
-[`pyxrootdclient`](https://github.com/rob-c/xrd) for the transport.
+[`xrdclient`](https://github.com/rob-c/xrdclient) for the transport.
 
 ## What is in the catalogue
 
@@ -82,7 +82,7 @@ See [running a site](docs/datasets-site.md), and
 
 ## Where this sits
 
-    xrd          the XRootD protocol, files, copies, auth       (pyxrootdclient)
+    xrdclient    the XRootD protocol, files, copies, authentication
       └─ xrdroot        the ROOT file format
            └─ xrdml     trees to tensors, a URL to a training loop
                 └─ xrddatasets   this package: open data converted to ROOT, and its site

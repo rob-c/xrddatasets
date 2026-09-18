@@ -151,7 +151,7 @@ readers and select its stable name prefix. This fetches 12.13 GB across all
 finished shard:
 
 ```console
-$ python -m pip install 'pyxrootdclient[datasets]'
+$ python -m pip install 'xrdclient[datasets]'
 $ xrd-datasets build /nfs/datasets --only 'hub_*' \
     --source-cache /nfs/dataset-sources --jobs 2
 ```
@@ -268,7 +268,7 @@ inflations and ROOT compressions in parallel compete for disk bandwidth and
 temporary space rather than making one finish sooner. The Hub shelf, JetNet,
 WikiText-103, MedMNIST and the visual sets need the optional NumPy, Parquet,
 HDF5 and image readers
-installed with `pip install 'pyxrootdclient[datasets]'`; the remaining
+installed with `pip install 'xrdclient[datasets]'`; the remaining
 admitted converters use the standard library. Do not benchmark
 serving while a conversion is saturating the same NFS mount; after the build,
 serving does not touch the retained source cache.
